@@ -18,14 +18,29 @@
 #include <sys/wait.h>
 #include <signal.h>
 
-#define PORT "8800"
+#define PORT "8080"
 
 #define PCONNECT 10     // pending connections
 
-void *clientchat(int *clientfd)
+#define MAXDATASIZE 1024
+void *clientchat(void *clientfd)
 {
-	if (send(*clientfd, "Hello, world!", 13, 0) == -1)
-			perror("send");
+	unsigned int cfd;
+	int nbytes;
+	char buf[MAXDATASIZE],req[20];
+	cfd= *(unsigned int *) clientfd;
+	if ((nbytes = recv(cfd, buf, MAXDATASIZE-1, 0)) == -1) {
+		perror("recv");
+		exit(1);
+	}
+	buf[nbytes]='\0';
+
+	printf("server: received '%s'\n",buf);
+	sscanf(buf,"%s",req);
+	if (send(cfd, req, strlen(req), 0) == -1)
+		perror("send");
+	close(cfd);
+	pthread_exit(NULL);
 }
 void sigchld_handler(int s)
 {
@@ -53,8 +68,10 @@ int main(void)
     char s[INET6_ADDRSTRLEN];
     int rv;
     pthread_t clthread;
-    int clret;
-    char cfd[20];
+    pthread_attr_t attr;
+    int clret,numbytes;
+    unsigned int ids;
+    char buf[MAXDATASIZE];
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;//support IPv4 & 6
@@ -110,7 +127,7 @@ int main(void)
     }
 
     printf("server: waiting for connections...\n");
-
+    pthread_attr_init(&attr);
     while(1) {  // main accept() loop
         sin_size = sizeof clientadr;
         clientfd = accept(sockfd, (struct sockaddr *)&clientadr, &sin_size);
@@ -123,16 +140,11 @@ int main(void)
             get_in_addr((struct sockaddr *)&clientadr),
             s, sizeof s);
         printf("server: got connection from %s\n", s);
-        clret = pthread_create(&clthread, NULL, clientchat, &clientfd);
-        /*if (!fork()) { // this is the child process
-            close(sockfd); // child doesn't need the listener
-            if (send(clientfd, "Hello, world!", 13, 0) == -1)
-                perror("send");
-            close(clientfd);
-            exit(0);
-        }*/
-        close(clientfd);  // parent doesn't need this
+
+        ids=clientfd;
+        clret = pthread_create(&clthread, &attr, clientchat, &ids);
     }
+    close(sockfd);
 
     return 0;
 }
