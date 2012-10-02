@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -20,6 +21,12 @@
 #define PORT "8800"
 
 #define PCONNECT 10     // pending connections
+
+void *clientchat(int *clientfd)
+{
+	if (send(*clientfd, "Hello, world!", 13, 0) == -1)
+			perror("send");
+}
 void sigchld_handler(int s)
 {
     while(waitpid(-1, NULL, WNOHANG) > 0);
@@ -37,14 +44,17 @@ void *get_in_addr(struct sockaddr *sa)
 
 int main(void)
 {
-    int sockfd, new_fd;  // listen on sock_fd, new connection on new_fd
+    int sockfd, clientfd;
     struct addrinfo hints, *servinfo, *p;
-    struct sockaddr_storage their_addr; // connector's address information
+    struct sockaddr_storage clientadr; // connector's address information
     socklen_t sin_size;
     struct sigaction sa;
     int yes=1;
     char s[INET6_ADDRSTRLEN];
     int rv;
+    pthread_t clthread;
+    int clret;
+    char cfd[20];
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;//support IPv4 & 6
@@ -102,26 +112,26 @@ int main(void)
     printf("server: waiting for connections...\n");
 
     while(1) {  // main accept() loop
-        sin_size = sizeof their_addr;
-        new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-        if (new_fd == -1) {
+        sin_size = sizeof clientadr;
+        clientfd = accept(sockfd, (struct sockaddr *)&clientadr, &sin_size);
+        if (clientfd == -1) {
             perror("accept");
             continue;
         }
 
-        inet_ntop(their_addr.ss_family,
-            get_in_addr((struct sockaddr *)&their_addr),
+        inet_ntop(clientadr.ss_family,
+            get_in_addr((struct sockaddr *)&clientadr),
             s, sizeof s);
         printf("server: got connection from %s\n", s);
-
-        if (!fork()) { // this is the child process
+        clret = pthread_create(&clthread, NULL, clientchat, &clientfd);
+        /*if (!fork()) { // this is the child process
             close(sockfd); // child doesn't need the listener
-            if (send(new_fd, "Hello, world!", 13, 0) == -1)
+            if (send(clientfd, "Hello, world!", 13, 0) == -1)
                 perror("send");
-            close(new_fd);
+            close(clientfd);
             exit(0);
-        }
-        close(new_fd);  // parent doesn't need this
+        }*/
+        close(clientfd);  // parent doesn't need this
     }
 
     return 0;
