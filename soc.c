@@ -20,7 +20,8 @@ static char* ok_response = "HTTP/1.0 200 OK\n" "Content-type: text/html\n" "\n";
 static char* bad_request_response = "HTTP/1.0 400 Bad Request\n" "Content-type: text/html\n" "\n" "<html>\n" " <body>\n" " <h1>Bad Request</h1>\n" " <p>This server did not understand your request.</p>\n" " </body>\n" "</html>\n";
 void usage();
 int setup_client();
-int setup_server();
+void *setup_server();
+void *queue();
 
 int s, sock, ch, server, done, bytes, aflg,nthreads=4;
 int soctype = SOCK_STREAM;
@@ -28,7 +29,7 @@ char *host = NULL;
 char *port = NULL;
 extern char *optarg;
 extern int optind;
-
+int newsock=0,clsock;
 
 static void handle_get (int connection_fd, const char* page)
 {
@@ -48,11 +49,12 @@ static void handle_get (int connection_fd, const char* page)
 		}
 	}
 }
-static void * handle_connection (int fdSock)
+void * handle_connection (void * fdSock)
 {
-	int connection_fd = fdSock;
-	char buffer[256];
+	int connection_fd = (int)fdSock;
+	char buffer[1024];
 	ssize_t bytes_read;
+	printf("File Descriptor:%d",fdSock);
 	bytes_read = read (connection_fd, buffer, sizeof (buffer) - 1);
 	if (bytes_read > 0)
 	{
@@ -61,24 +63,30 @@ static void * handle_connection (int fdSock)
 		char protocol[sizeof (buffer)];
 		buffer[bytes_read] = '\0';
 		sscanf (buffer, "%s %s %s", method, url, protocol);
-		while (strstr (buffer, "\r\n\r\n") == NULL)
+		printf("\nMethod:%s URL:%s PROTOCOL:%s",method,url, protocol);
+		/*while (strstr (buffer, "\r\n\r\n") == NULL)
 			bytes_read = read (connection_fd, buffer, sizeof (buffer));
+		printf("\nBuffer:%s, Bytesread:%d",buffer,bytes_read);
 		if (bytes_read == -1)
 		{
 			close (connection_fd);
-		}
-		if (strcmp (protocol, "HTTP/1.0") && strcmp (protocol, "HTTP/1.1"))
+		}*/
+		if (strcmp (protocol, "HTTP/1.0") || strcmp (protocol, "HTTP/1.1"))
 		{
-			write (connection_fd, bad_request_response, sizeof (bad_request_response));
+			printf("HTTP detected");
+			send (connection_fd, "HTTP detected",14,0);
+			//send (connection_fd, bad_request_response, sizeof (bad_request_response),0);
 		}
-		else if (strcmp (method, "GET"))
+		if (strcmp (method, "GET"))
 		{
-			char response[1024];
-			snprintf (response, sizeof (response), bad_method_response_template, method);
-			write (connection_fd, response, strlen (response));
-		}
-		else
+			//char response[1024];
+			//snprintf (response, sizeof (response), bad_method_response_template, method);
+			printf("GET reached");
+			//send (connection_fd, response, strlen (response),0);
+		//}
+		//else
 			handle_get (connection_fd, url);
+		}
 	 }
 	 else if (bytes_read == 0)
 		 ;
@@ -88,7 +96,7 @@ static void * handle_connection (int fdSock)
 	 }
 	 close(connection_fd);
 }
-void * serv_request(void *insock)
+/*void * serv_request(void *insock)
 {
 	 int msock = (int)insock;
 	 struct sockaddr_in fsin;
@@ -110,7 +118,7 @@ void * serv_request(void *insock)
 		 if (FD_ISSET(msock,&rfds))
 		 {
 			 int ssock;
-			 alen=sizeof(fsin); /* Serving new incoming client's connection */
+			 alen=sizeof(fsin); // Serving new incoming client's connection
 			 pthread_mutex_lock(&get_mutex);
 			 ssock=accept(msock,(struct sockaddr *)&fsin,&alen);
 			 pthread_mutex_unlock(&get_mutex);
@@ -120,18 +128,18 @@ void * serv_request(void *insock)
 			 address_length = sizeof (socket_address);
 			 rval = getpeername (ssock, &socket_address, &address_length);
 			 assert (rval == 0);
-			 printf ("Thread '%d' accepted connection from %s\n", pthread_self(),inet_ntoa (socket_address.sin_addr));
+			 printf ("\nThread '%d' accepted connection from %s\n", pthread_self(),inet_ntoa (socket_address.sin_addr));
 			 FD_SET(ssock,&afds);
 		 }
 		 for (fd=0;fd < nfds; ++fd)
 			 if (fd != msock && FD_ISSET(fd,&rfds))
 			 {
-				 printf("Thread '%d' responding request...\n",pthread_self()); /* Serving client had been already connected to server */
+				 printf("\nThread '%d' responding request...\n",pthread_self()); //Serving client had been already connected to server
 				 handle_connection(fd);
 				 FD_CLR(fd,&afds);
 			 }
 		 }
-}
+}*/
 
 int main(int argc,char *argv[])
 {
@@ -189,25 +197,28 @@ int main(int argc,char *argv[])
 		sock = setup_client();
 	else
 	{
-		setup_server();
+		//setup_server();
 		size_t stacksize;
-		pthread_t *thread_pool;
+		pthread_t *listhread,*schque;
 		pthread_attr_t attr;
-		thread_pool=malloc((nthreads+2)*sizeof(pthread_t));
+		listhread=malloc(sizeof(pthread_t));
+		schque=malloc(sizeof(pthread_t));
 		pthread_attr_init(&attr);
 		stacksize = 500000;
 		pthread_attr_setstacksize (&attr, stacksize);
 		pthread_attr_getstacksize (&attr, &stacksize);
-		for(i=0; i<nthreads+2; i++)
+		pthread_create(&listhread,&attr,setup_server,NULL);
+		pthread_create(&schque,&attr,queue,NULL);
+		/*for(i=0; i<nthreads+1; i++)
 		{
 			 pthread_create(&thread_pool[i],&attr,serv_request,(void*)s);
-		}
+		}*/
 		pthread_attr_destroy(&attr);
-		for(i=0;i<nthreads+2;i++)
-		{
-			pthread_join(thread_pool[i], NULL);
+		//for(i=0;i<nthreads+2;i++)
+		//{
+			pthread_join(listhread, NULL);
 			printf("Completed join with thread %d\n",i);
-		}
+		//}
 	}
 /*
  * Set up select(2) on both socket and terminal, anything that comes
@@ -289,15 +300,39 @@ setup_client() {
 		fprintf(stderr, "Connected...\n");
 	return(s);
 }
+void *queue()
+{
+	static int top=0;
+	size_t stacksize;
+	pthread_t *thread_pool;
+	pthread_attr_t attr;
+	thread_pool=malloc((nthreads)*sizeof(pthread_t));
+	pthread_attr_init(&attr);
+	stacksize = 500000;
+	pthread_attr_setstacksize (&attr, stacksize);
+	pthread_attr_getstacksize (&attr, &stacksize);
+	while(1)
+	{
+		if(newsock && top<nthreads)
+		{
+			newsock=0;
+			printf("\nThread%d",top);
+			pthread_create(&thread_pool[top],&attr,handle_connection,(void*)clsock);
+			pthread_join(thread_pool[top], NULL);
+			top++;
+		}
+	}
+	pthread_attr_destroy(&attr);
+}
 
 /*
  * setup_server() - set up socket for mode of soc running as a server.
  */
 
-void setup_server() {
+void *setup_server() {
 	struct sockaddr_in serv, remote;
 	struct servent *se;
-	int newsock, len;
+	int len;
 
 	len = sizeof(remote);
 	memset((void *)&serv, 0, sizeof(serv));
@@ -322,12 +357,20 @@ void setup_server() {
 		exit(1);
 	}
 	fprintf(stderr, "Port number is %d\n", ntohs(remote.sin_port));
-	listen(s, 1);
-	//newsock = s;
-	if (soctype == SOCK_STREAM) {
-		fprintf(stderr, "Entering accept() waiting for connection.\n");
-	//	newsock = accept(s, (struct sockaddr *) &remote, &len);
+	while(1){
+		listen(s, nthreads);
+		//newsock = s;
+		if (soctype == SOCK_STREAM) {
+			fprintf(stderr, "Entering accept() waiting for connection.\n");
+			clsock = accept(s, (struct sockaddr *) &remote, &len);
+			if(clsock!=-1)
+			{
+				newsock=1;
+				//queue();
+			}
+		}
 	}
+
 	//return(newsock);
 }
 
