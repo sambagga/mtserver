@@ -4,6 +4,7 @@
 #include	<stdlib.h>
 #include	<string.h>
 #include	<ctype.h>
+#include	<fcntl.h>
 #include	<assert.h>
 #include	<sys/types.h>
 #include	<sys/socket.h>
@@ -11,13 +12,15 @@
 #include	<netinet/in.h>
 #include	<inttypes.h>
 #include	<pthread.h>
+#include 	<sys/stat.h>
+#define OK_IMAGE    "HTTP/1.0 200 OK\nContent-Type:image/gif\n\n"
+#define OK_HTML     "HTTP/1.0 200 OK\nContent-Type:text/html\n\n"
+#define NOTOK_404   "HTTP/1.0 404 Not Found\nContent-Type:text/html\n\n"
+#define FNF_404    "<html><body><h1>FILE NOT FOUND</h1></body></html>"
+#define BUFSIZE 1024
 char *progname;
 char buf[BUF_LEN];
 pthread_mutex_t get_mutex=PTHREAD_MUTEX_INITIALIZER;
-static char* not_found_response_template = "HTTP/1.0 404 Not Found\n" "Content-type: text/html\n" "\n" "<html>\n" " <body>\n" " <h1>Not Found</h1>\n" " <p>The requested URL %s was not found on this server.</p>\n" " </body>\n" "</html>\n";
-static char* bad_method_response_template = "HTTP/1.0 501 Method Not Implemented\n" "Content-type: text/html\n" "\n" "<html>\n" " <body>\n" " <h1>Method Not Implemented</h1>\n" " <p>The method %s is not implemented by this server.</p>\n" " </body>\n" "</html>\n";
-static char* ok_response = "HTTP/1.0 200 OK\n" "Content-type: text/html\n" "\n";
-static char* bad_request_response = "HTTP/1.0 400 Bad Request\n" "Content-type: text/html\n" "\n" "<html>\n" " <body>\n" " <h1>Bad Request</h1>\n" " <p>This server did not understand your request.</p>\n" " </body>\n" "</html>\n";
 void usage();
 int setup_client();
 void *setup_server();
@@ -30,72 +33,62 @@ char *port = NULL;
 extern char *optarg;
 extern int optind;
 int newsock=0,clsock;
+void *handle_requests(void * arg)
+{
+    int client_s=(int) arg;         //copy socket
 
-static void handle_get (int connection_fd, const char* page)
-{
-	if (*page == '/' && strchr (page + 1, '/') == NULL)
-	{
-		char module_file_name[64];
-		snprintf (module_file_name, sizeof (module_file_name), "%s.so", page + 1);
-		if (module_file_name == NULL)
-		{
-			char response[1024];
-			snprintf (response, sizeof (response), not_found_response_template, page);
-			write (connection_fd, response, strlen (response));
-		}
-		else
-		{
-			write (connection_fd, ok_response, strlen (ok_response));
-		}
-	}
+    char ibuf[BUFSIZE];          // for GET request
+    char obuf[BUFSIZE];          // for HTML response
+    char *fname;
+    int fd;
+    int buffile;
+    int retcode;
+
+
+
+      retcode = recv(client_s, ibuf, BUFSIZE, 0);	//HTTP request
+
+      if (retcode < 0)
+    	  printf("recv error detected ...\n");
+      else
+      {
+        //get the file name
+        strtok(ibuf, " ");
+        fname = strtok(NULL, " ");
+        fd = open(&fname[0], O_RDONLY, S_IREAD | S_IWRITE);
+        if (fd == -1)
+        {
+          printf("File %s not found\n", &fname[1]);
+          strcpy(obuf, NOTOK_404);
+          send(client_s, obuf, strlen(obuf), 0);
+          strcpy(obuf, FNF_404);
+          send(client_s, obuf, strlen(obuf), 0);
+        }
+        else
+        {
+          printf("File %s is being sent \n", &fname[1]);
+          if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
+        	  strcpy(obuf, OK_IMAGE);
+          else
+        	  strcpy(obuf, OK_HTML);
+          send(client_s, obuf, strlen(obuf), 0);
+
+          buffile = 1;
+          while (buffile > 0)
+          {
+            buffile = read(fd, obuf, BUFSIZE);
+            if (buffile > 0)
+            {
+              send(client_s, obuf, buffile, 0);
+            }
+          }
+        }
+      }
+      close(fd);
+      close(client_s);
+      pthread_exit(NULL);
 }
-void * handle_connection (void * fdSock)
-{
-	int connection_fd = (int)fdSock;
-	char buffer[1024];
-	ssize_t bytes_read;
-	printf("File Descriptor:%d",fdSock);
-	bytes_read = read (connection_fd, buffer, sizeof (buffer) - 1);
-	if (bytes_read > 0)
-	{
-		char method[sizeof (buffer)];
-		char url[sizeof (buffer)];
-		char protocol[sizeof (buffer)];
-		buffer[bytes_read] = '\0';
-		sscanf (buffer, "%s %s %s", method, url, protocol);
-		printf("\nMethod:%s URL:%s PROTOCOL:%s",method,url, protocol);
-		/*while (strstr (buffer, "\r\n\r\n") == NULL)
-			bytes_read = read (connection_fd, buffer, sizeof (buffer));
-		printf("\nBuffer:%s, Bytesread:%d",buffer,bytes_read);
-		if (bytes_read == -1)
-		{
-			close (connection_fd);
-		}*/
-		if (strcmp (protocol, "HTTP/1.0") || strcmp (protocol, "HTTP/1.1"))
-		{
-			printf("HTTP detected");
-			send (connection_fd, "HTTP detected",14,0);
-			//send (connection_fd, bad_request_response, sizeof (bad_request_response),0);
-		}
-		if (strcmp (method, "GET"))
-		{
-			//char response[1024];
-			//snprintf (response, sizeof (response), bad_method_response_template, method);
-			printf("GET reached");
-			//send (connection_fd, response, strlen (response),0);
-		//}
-		//else
-			handle_get (connection_fd, url);
-		}
-	 }
-	 else if (bytes_read == 0)
-		 ;
-	 else
-	 {
-		perror ("read");
-	 }
-	 close(connection_fd);
-}
+
 /*void * serv_request(void *insock)
 {
 	 int msock = (int)insock;
@@ -316,8 +309,8 @@ void *queue()
 		if(newsock && top<nthreads)
 		{
 			newsock=0;
-			printf("\nThread%d",top);
-			pthread_create(&thread_pool[top],&attr,handle_connection,(void*)clsock);
+			printf("\nThread%d created\n",top);
+			pthread_create(&thread_pool[top],&attr,handle_requests,(void*)clsock);
 			pthread_join(thread_pool[top], NULL);
 			top++;
 		}
@@ -360,13 +353,16 @@ void *setup_server() {
 	while(1){
 		listen(s, nthreads);
 		//newsock = s;
-		if (soctype == SOCK_STREAM) {
-			fprintf(stderr, "Entering accept() waiting for connection.\n");
-			clsock = accept(s, (struct sockaddr *) &remote, &len);
-			if(clsock!=-1)
-			{
-				newsock=1;
-				//queue();
+		if(newsock==0)
+		{
+			if (soctype == SOCK_STREAM) {
+				fprintf(stderr, "Entering accept() waiting for connection.\n");
+				clsock = accept(s, (struct sockaddr *) &remote, &len);
+				if(clsock!=-1)
+				{
+					newsock=1;
+					//queue();
+				}
 			}
 		}
 	}
