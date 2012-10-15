@@ -62,6 +62,33 @@ struct thread_data{
 	pthread_mutex_t *mutex_p;
 	struct tpool *tp_p;
 };
+typedef struct connection_attribs_s {
+    int sock_fd;
+    time_t receipt_time;
+    time_t sched_time;
+    int status;
+    size_t size;
+    char method[256];
+    struct sockaddr_in client_address;
+}connection_attribs_t;
+FILE *log_file_fd = NULL;
+connection_attribs_t conn_attrs_arr;
+void log_status()
+{
+	printf("Log status!");
+	printf("%s %s %s \"%s\" %d %zu",
+		inet_ntoa (conn_attrs_arr.client_address.sin_addr),
+	    asctime(gmtime(&conn_attrs_arr.receipt_time)),
+	    asctime(gmtime(&conn_attrs_arr.sched_time)),
+	    conn_attrs_arr.method, conn_attrs_arr.status, conn_attrs_arr.size);
+	if(!log_file_fd)
+		return;
+	fprintf(log_file_fd, "%s %s %s \"%s\" %d %zu",
+	inet_ntoa (conn_attrs_arr.client_address.sin_addr),
+    asctime(gmtime(&conn_attrs_arr.receipt_time)),
+    asctime(gmtime(&conn_attrs_arr.sched_time)),
+    conn_attrs_arr.method, conn_attrs_arr.status, conn_attrs_arr.size);
+}
 
 void tpool_handlereq(struct tpool* t);
 //Queue
@@ -154,8 +181,12 @@ void *handle_requests(void * arg)
     int fd;
     int buffile;
     int retcode;
+    char line[256];
 
     retcode = recv(client_s, ibuf, BUFSIZE, 0);	//HTTP request
+    sscanf(ibuf,"%s[^\n]",line);
+    strncpy(conn_attrs_arr.method, line, sizeof(line));
+    conn_attrs_arr.size = strlen(ibuf);
     if (retcode < 0)
   	  printf("recv error detected ...\n");
     else
@@ -167,6 +198,7 @@ void *handle_requests(void * arg)
         if (fd == -1)
         {
           printf("File %s not found\n", &fname[1]);
+          conn_attrs_arr.status = 404;
           strcpy(obuf, NOTOK_404);
           send(client_s, obuf, strlen(obuf), 0);
           strcpy(obuf, FNF_404);
@@ -175,6 +207,7 @@ void *handle_requests(void * arg)
         else
         {
         	printf("File %s is being sent \n", &fname[1]);
+        	conn_attrs_arr.status = 200;
         	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
         		strcpy(obuf, OK_IMAGE);
         	else
@@ -190,10 +223,11 @@ void *handle_requests(void * arg)
         		}
         	}
         }
-      }
-      close(fd);
-      close(client_s);
-      pthread_exit(NULL);
+    }
+    log_status();
+    close(fd);
+    close(client_s);
+    pthread_exit(NULL);
 }
 
 struct tpool* poolinit()
@@ -249,6 +283,8 @@ void tpool_handlereq(struct tpool* t)
 			req = getlast(t);
 			func_buff=req->function;
 			arg_buff =req->arg;
+			conn_attrs_arr.sched_time = time(NULL);
+			conn_attrs_arr.sock_fd = (int)req->arg;
 			remqueue(t);
 			pthread_mutex_unlock(&get_mutex);               //release mutex
 			func_buff(arg_buff);               			 	//execute function
@@ -321,6 +357,10 @@ int main(int argc,char *argv[])
 	struct sockaddr_in msgfrom;
 	int msgsize,i;
 	struct tpool *threadpool;
+	char log_file[256];
+
+	log_file[0] = '\0';
+
 	union {
 		uint32_t addr;
 		char bytes[4];
@@ -330,7 +370,7 @@ int main(int argc,char *argv[])
 		progname = argv[0];
 	else
 		progname++;
-	while ((ch = getopt(argc, argv, "adsn:p:h:")) != -1)
+	while ((ch = getopt(argc, argv, "adsn:p:h:l:")) != -1)
 		switch(ch) {
 			case 'a':
 				aflg++;		/* print address in output */
@@ -350,6 +390,9 @@ int main(int argc,char *argv[])
 			case 'h':
 				host = optarg;
 				break;
+			case 'l':
+				strncpy(log_file, optarg, sizeof(log_file));
+				break;
 			case '?':
 			default:
 				usage();
@@ -361,6 +404,13 @@ int main(int argc,char *argv[])
 		usage();
 	if (server && host != NULL)
 		usage();
+	if (log_file[0])
+	{
+		  log_file_fd = fopen(log_file, "w");
+	      if(!log_file_fd)
+	          perror("couldn't open log file");
+	}
+
 /*
  * Create socket on local host.
  */
@@ -384,6 +434,7 @@ int main(int argc,char *argv[])
 		pthread_create(&schque,&attr,queue,(void *)threadpool);
 		pthread_attr_destroy(&attr);
 		pthread_join(listhread, NULL);
+		pthread_join(queue, NULL);
 		printf("Completed join with thread %d\n",i);
 	}
 /*
@@ -483,6 +534,8 @@ void *queue(void *tp)
 			top++;
 		}
 	}
+	delpool(thread_pool);
+	pthread_exit(NULL);
 }
 
 /*
@@ -493,6 +546,9 @@ void *setup_server() {
 	struct sockaddr_in serv, remote;
 	struct servent *se;
 	int len;
+	int rval;
+	socklen_t address_length;
+	struct sockaddr_in socket_address;
 
 	len = sizeof(remote);
 	memset((void *)&serv, 0, sizeof(serv));
@@ -519,22 +575,23 @@ void *setup_server() {
 	fprintf(stderr, "Port number is %d\n", ntohs(remote.sin_port));
 	while(1){
 		listen(s, nthreads);
-		//newsock = s;
 		if(newsock==0)
 		{
 			if (soctype == SOCK_STREAM) {
 				fprintf(stderr, "Entering accept() waiting for connection.\n");
 				clsock = accept(s, (struct sockaddr *) &remote, &len);
 				if(clsock!=-1)
-				{
 					newsock=1;
-					//queue();
-				}
+				conn_attrs_arr.receipt_time = time(NULL);
+				socklen_t address_length;
+				address_length = sizeof (socket_address);
+				rval = getpeername (clsock, &socket_address, &address_length);
+				assert (rval == 0);
+				memcpy(&conn_attrs_arr.client_address, &socket_address, sizeof(socket_address));
 			}
 		}
 	}
-
-	//return(newsock);
+	pthread_exit(NULL);
 }
 
 /*
