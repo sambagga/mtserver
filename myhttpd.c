@@ -35,7 +35,7 @@ char *port = NULL;
 extern char *optarg;
 extern int optind;
 int newsock=0,clsock;
-static int tpool_running=1;
+static int execution=1;
 
 struct treq{
 	void* (*function)(void* arg);
@@ -45,8 +45,8 @@ struct treq{
 };
 
 struct trque{
-	struct treq *start;
-	struct treq *end;
+	struct treq *front;
+	struct treq *back;
 	int njob;
 	sem_t *queueSem;
 };
@@ -55,96 +55,112 @@ struct trque{
 struct tpool{
 	pthread_t* tid;
 	int nthreads;
-	struct trque* reqqueue;
+	struct trque reqqueue;
 };
 
-struct thread_data{
-	pthread_mutex_t *mutex_p;
-	struct tpool *tp_p;
-};
+typedef struct logging {
+    int sock_fd;
+    time_t receipt_time;
+    time_t sched_time;
+    int status;
+    size_t size;
+    char method[256];
+    struct sockaddr_in client_address;
+}log;
 
-void tpool_handlereq(struct tpool* t);
-//Queue
-int queinit(struct tpool* t)
+FILE *log_file_fd = NULL;
+log log_data;
+void log_status()
 {
-	t->reqqueue=(struct trque*)malloc(sizeof(struct trque));
-	if (t->reqqueue==NULL) return -1;
-	t->reqqueue->start=NULL;
-	t->reqqueue->end=NULL;
-	t->reqqueue->njob=0;
-	return 0;
+	printf("Log status!");
+	printf("%s %s %s \"%s\" %d %zu",
+		inet_ntoa (log_data.client_address.sin_addr),
+	    asctime(gmtime(&log_data.receipt_time)),
+	    asctime(gmtime(&log_data.sched_time)),
+	    log_data.method, log_data.status, log_data.size);
+	if(!log_file_fd)
+		return;
+	fprintf(log_file_fd, "%s %s %s \"%s\" %d %zu",
+	inet_ntoa (log_data.client_address.sin_addr),
+    asctime(gmtime(&log_data.receipt_time)),
+    asctime(gmtime(&log_data.sched_time)),
+    log_data.method, log_data.status, log_data.size);
 }
 
-void addque(struct tpool* t, struct treq* r)
+void handlereq(struct tpool *t);
+//Queue
+void addque(struct tpool *t, struct treq* r)
 {
 	r->next=NULL;
 	r->prev=NULL;
-	struct treq *oldfront;
-	oldfront = t->reqqueue->start;
+	struct treq *oldback;
+	oldback = t->reqqueue.back;
 
-	switch(t->reqqueue->njob)
+	switch(t->reqqueue.njob)
 	{
 		case 0:     // empty queue
-			t->reqqueue->end=r;
-			t->reqqueue->start=r;
+			t->reqqueue.front=r;
+			t->reqqueue.back=r;
 			break;
 		default: 	// >0 jobs
-			oldfront->prev=r;
-			r->next=oldfront;
-			t->reqqueue->start=r;
+			oldback->prev=r;
+			r->next=oldback;
+			t->reqqueue.back=r;
+			break;
 	}
-	(t->reqqueue->njob)++;
-	sem_post(t->reqqueue->queueSem);
+	(t->reqqueue.njob)++;
+	sem_post(t->reqqueue.queueSem);
 
 	int sval;
-	sem_getvalue(t->reqqueue->queueSem, &sval);
+	sem_getvalue(t->reqqueue.queueSem, &sval);
 }
 
-int remqueue(struct tpool* t)
+int remque(struct tpool* t)
 {
 	struct treq *oldback;
-	oldback = t->reqqueue->end;
-	switch(t->reqqueue->njob) //delete from back
+	oldback = t->reqqueue.front;
+	switch(t->reqqueue.njob) //remove from front
 	{
 		case 0:     //empty queue
 			return -1;
 			break;
 		case 1:     //only one request
-			t->reqqueue->end=NULL;
-			t->reqqueue->start=NULL;
+			t->reqqueue.front=NULL;
+			t->reqqueue.back=NULL;
 			break;
 		default: 	//>1 requests in queue
 			oldback->prev->next=NULL;
-			t->reqqueue->end=oldback->prev;
+			t->reqqueue.front=oldback->prev;
+			break;
 	}
 
-	(t->reqqueue->njob)--;
+	(t->reqqueue.njob)--;
 	int sval;
-	sem_getvalue(t->reqqueue->queueSem, &sval);
+	sem_getvalue(t->reqqueue.queueSem, &sval);
 	return 0;
 }
 
 struct treq* getlast(struct tpool* t)
 {
-	return t->reqqueue->end;
+	return t->reqqueue.front;
 }
 
 void delqueue(struct tpool* t)
 {
 	struct treq* curreq;
-	curreq=t->reqqueue->end;
-	while(t->reqqueue->njob)
+	curreq=t->reqqueue.front;
+	while(t->reqqueue.njob)
 	{
-		t->reqqueue->end=curreq->prev;
+		t->reqqueue.front=curreq->prev;
 		free(curreq);
-		curreq=t->reqqueue->end;
-		t->reqqueue->njob--;
+		curreq=t->reqqueue.front;
+		t->reqqueue.njob--;
 	}
-	t->reqqueue->start=NULL;
-	t->reqqueue->end=NULL;
+	t->reqqueue.back=NULL;
+	t->reqqueue.front=NULL;
 }
 
-void *handle_requests(void * arg)
+void *protocol(void * arg)
 {
     int client_s=(int) arg;         //copy socket
 
@@ -154,8 +170,12 @@ void *handle_requests(void * arg)
     int fd;
     int buffile;
     int retcode;
+    char line[256];
 
     retcode = recv(client_s, ibuf, BUFSIZE, 0);	//HTTP request
+    sscanf(ibuf,"%s",line);
+    strncpy(log_data.method, line, sizeof(line));
+    log_data.size = strlen(ibuf);
     if (retcode < 0)
   	  printf("recv error detected ...\n");
     else
@@ -167,6 +187,7 @@ void *handle_requests(void * arg)
         if (fd == -1)
         {
           printf("File %s not found\n", &fname[1]);
+          log_data.status = 404;
           strcpy(obuf, NOTOK_404);
           send(client_s, obuf, strlen(obuf), 0);
           strcpy(obuf, FNF_404);
@@ -175,6 +196,7 @@ void *handle_requests(void * arg)
         else
         {
         	printf("File %s is being sent \n", &fname[1]);
+        	log_data.status = 200;
         	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
         		strcpy(obuf, OK_IMAGE);
         	else
@@ -190,21 +212,17 @@ void *handle_requests(void * arg)
         		}
         	}
         }
-      }
-      close(fd);
-      close(client_s);
-      pthread_exit(NULL);
+    }
+    log_status();
+    close(fd);
+    close(client_s);
+    pthread_exit(NULL);
 }
 
-struct tpool* poolinit()
+struct tpool *poolinit()
 {
-	struct tpool* t;
+	struct tpool *t;
 	t=(struct tpool*)malloc(sizeof(struct tpool));
-	if (t==NULL)
-	{
-		printf("poolinit(): Memory allocation for thread pool error\n");
-		return NULL;
-	}
 	t->tid=(pthread_t*)malloc(nthreads*sizeof(pthread_t));
 	if (t->tid==NULL)
 	{
@@ -214,33 +232,30 @@ struct tpool* poolinit()
 	t->nthreads=nthreads;
 
 	// Initialise the request queue
-	if (queinit(t)==-1){
-		fprintf(stderr, "thpool_init(): Memory allocation for request queue error\n");
-		return NULL;
-	}
-
-	// Initialise semaphore
-	t->reqqueue->queueSem=(sem_t*)malloc(sizeof(sem_t));
-	sem_init(t->reqqueue->queueSem, 0, 0);
+	t->reqqueue.back=NULL;
+	t->reqqueue.front=NULL;
+	t->reqqueue.njob=0;
+	t->reqqueue.queueSem=(sem_t*)malloc(sizeof(sem_t));
+	sem_init(t->reqqueue.queueSem, 0, 0);
 	/* Make threads in pool */
 	int i;
 	for (i=0;i<nthreads;i++){
 		printf("Created thread %d in pool \n", i);
-		pthread_create(&(t->tid[i]), NULL, (void *)tpool_handlereq, (void *)t);
+		pthread_create(&(t->tid[i]), NULL, (void *)handlereq, (void *)t);
 	}
 	return t;
 }
 
-void tpool_handlereq(struct tpool* t)
+void handlereq(struct tpool* t)
 {
-	while(tpool_running)
+	while(execution)
 	{
-		if (sem_wait(t->reqqueue->queueSem)) 		//waiting for a request
+		if (sem_wait(t->reqqueue.queueSem)) 		//waiting for a request
 		{
-			perror("tpool_handlereq(): Error in semaphore");
+			perror("handlereq(): Error in semaphore");
 			exit(1);
 		}
-		if (tpool_running)		// Read and handle request from queue
+		if (execution)		// Read and handle request from queue
 		{
 			void*(*func_buff)(void* arg);
 			void*  arg_buff;
@@ -249,7 +264,9 @@ void tpool_handlereq(struct tpool* t)
 			req = getlast(t);
 			func_buff=req->function;
 			arg_buff =req->arg;
-			remqueue(t);
+			log_data.sched_time = time(NULL);
+			log_data.sock_fd = (int)req->arg;
+			remque(t);
 			pthread_mutex_unlock(&get_mutex);               //release mutex
 			func_buff(arg_buff);               			 	//execute function
 			free(req);
@@ -262,13 +279,13 @@ void tpool_handlereq(struct tpool* t)
 	return;
 }
 
-int tpool_quereq(struct tpool* t, void *(*func)(void*), void* iarg)
+int quereq(struct tpool* t, void *(*func)(void*), void* iarg)
 {
 	struct treq* nreq;
 	nreq=(struct treq*)malloc(sizeof(struct treq));
 	if (nreq==NULL)
 	{
-		fprintf(stderr, "tpool_quereq(): Memory allocation for new request failed\n");
+		fprintf(stderr, "quereq(): Memory allocation for new request failed\n");
 		exit(1);
 	}
 
@@ -286,16 +303,16 @@ int tpool_quereq(struct tpool* t, void *(*func)(void*), void* iarg)
 void delpool(struct tpool* t)
 {
 	int i;
-	tpool_running=0; //end thread's infinite loop
+	execution=0; //end thread's infinite loop
 	for (i=0; i<(t->nthreads); i++)	//idle threads waiting at semaphore
 	{
-		if (sem_post(t->reqqueue->queueSem))
+		if (sem_post(t->reqqueue.queueSem))
 		{
 			fprintf(stderr, "delpool(): error in sem_wait()\n");
 		}
 	}
 
-	if (sem_destroy(t->reqqueue->queueSem)!=0)
+	if (sem_destroy(t->reqqueue.queueSem)!=0)
 	{
 		fprintf(stderr, "delpool(): error in destroying semaphore\n");
 	}
@@ -308,8 +325,7 @@ void delpool(struct tpool* t)
 	delqueue(t);
 
 	free(t->tid);
-	free(t->reqqueue->queueSem);
-	free(t->reqqueue);
+	free(t->reqqueue.queueSem);
 	free(t);
 }
 
@@ -321,6 +337,10 @@ int main(int argc,char *argv[])
 	struct sockaddr_in msgfrom;
 	int msgsize,i;
 	struct tpool *threadpool;
+	char log_file[256];
+
+	log_file[0] = '\0';
+
 	union {
 		uint32_t addr;
 		char bytes[4];
@@ -330,7 +350,7 @@ int main(int argc,char *argv[])
 		progname = argv[0];
 	else
 		progname++;
-	while ((ch = getopt(argc, argv, "adsn:p:h:")) != -1)
+	while ((ch = getopt(argc, argv, "adsn:p:h:l:")) != -1)
 		switch(ch) {
 			case 'a':
 				aflg++;		/* print address in output */
@@ -350,9 +370,13 @@ int main(int argc,char *argv[])
 			case 'h':
 				host = optarg;
 				break;
+			case 'l':
+				strncpy(log_file, optarg, sizeof(log_file));
+				break;
 			case '?':
 			default:
 				usage();
+				break;
 		}
 	argc -= optind;
 	if (argc != 0)
@@ -361,6 +385,13 @@ int main(int argc,char *argv[])
 		usage();
 	if (server && host != NULL)
 		usage();
+	if (log_file[0])
+	{
+		  log_file_fd = fopen(log_file, "w");
+	      if(!log_file_fd)
+	          perror("couldn't open log file");
+	}
+
 /*
  * Create socket on local host.
  */
@@ -384,6 +415,7 @@ int main(int argc,char *argv[])
 		pthread_create(&schque,&attr,queue,(void *)threadpool);
 		pthread_attr_destroy(&attr);
 		pthread_join(listhread, NULL);
+		pthread_join(queue, NULL);
 		printf("Completed join with thread %d\n",i);
 	}
 /*
@@ -418,6 +450,7 @@ int main(int argc,char *argv[])
 			write(fileno(stdout), buf, bytes);
 		}
 	}*/
+	fclose(log_file_fd);
 	return(0);
 }
 
@@ -477,12 +510,14 @@ void *queue(void *tp)
 		if(newsock)
 		{
 			newsock=0;
-			tpool_quereq(thread_pool,handle_requests,(void*)clsock);
+			quereq(thread_pool,protocol,(void*)clsock);
 			if(suc==0)
 				printf("\n%d Request\n",top);
 			top++;
 		}
 	}
+	delpool(thread_pool);
+	pthread_exit(NULL);
 }
 
 /*
@@ -493,6 +528,9 @@ void *setup_server() {
 	struct sockaddr_in serv, remote;
 	struct servent *se;
 	int len;
+	int rval;
+	socklen_t address_length;
+	struct sockaddr_in socket_address;
 
 	len = sizeof(remote);
 	memset((void *)&serv, 0, sizeof(serv));
@@ -519,22 +557,23 @@ void *setup_server() {
 	fprintf(stderr, "Port number is %d\n", ntohs(remote.sin_port));
 	while(1){
 		listen(s, nthreads);
-		//newsock = s;
 		if(newsock==0)
 		{
 			if (soctype == SOCK_STREAM) {
 				fprintf(stderr, "Entering accept() waiting for connection.\n");
 				clsock = accept(s, (struct sockaddr *) &remote, &len);
 				if(clsock!=-1)
-				{
 					newsock=1;
-					//queue();
-				}
+				log_data.receipt_time = time(NULL);
+				socklen_t address_length;
+				address_length = sizeof (socket_address);
+				rval = getpeername (clsock, &socket_address, &address_length);
+				assert (rval == 0);
+				memcpy(&log_data.client_address, &socket_address, sizeof(socket_address));
 			}
 		}
 	}
-
-	//return(newsock);
+	pthread_exit(NULL);
 }
 
 /*
