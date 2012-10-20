@@ -1,5 +1,7 @@
 #define	BUF_LEN	8192
-
+#include	<iostream>
+#include	<vector>
+#include	<map>
 #include	<stdio.h>
 #include	<unistd.h>
 #include	<stdlib.h>
@@ -34,21 +36,19 @@ void *queue(void *);
 
 int s, sock, ch, server, done, bytes, aflg,nthreads=4;
 int soctype = SOCK_STREAM;
-char *port = NULL;
+char *port = NULL,sched[5];
 extern char *optarg;
 extern int optind;
-int newsock=0,clsock;
+int newsock=0,clsock,sch=1,quetime=60;
 static int execution=1;
-
-struct treq{
-	void* arg;
-	struct treq* next;
-	struct treq* prev;
+struct request{
+	void * arg;
+	char fname[BUFSIZE];
 };
 
 struct trque{
-	struct treq *front;
-	struct treq *back;
+	vector<struct request> fcfs;
+	map<int,struct request> sjf;
 	int njob;
 	sem_t *queueSem;
 };
@@ -72,6 +72,18 @@ typedef struct logging {
 
 FILE *log_file_fd = NULL;
 log log_data;
+string exec(char* cmd) {
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return "ERROR";
+    char buffer[128];
+    std::string result = "";
+    while(!feof(pipe)) {
+        if(fgets(buffer, 128, pipe) != NULL)
+                result += buffer;
+    }
+    pclose(pipe);
+    return result;
+}
 void log_status()
 {
 	char logs[1024],err;
@@ -96,129 +108,81 @@ void log_status()
 
 void* handlereq(void *th);
 //Queue
-void addque(struct tpool *t, struct treq* r)
+struct request getlast(struct tpool* t)
 {
-	r->next=NULL;
-	r->prev=NULL;
-	struct treq *oldback;
-	oldback = t->reqqueue.back;
-
-	switch(t->reqqueue.njob)
+	request r;
+	int index=t->reqqueue.njob-1;
+	if(sch==1)
 	{
-		case 0:     // empty queue
-			t->reqqueue.front=r;
-			t->reqqueue.back=r;
-			break;
-		default: 	// >0 jobs
-			oldback->prev=r;
-			r->next=oldback;
-			t->reqqueue.back=r;
-			break;
+		r=t->reqqueue.fcfs[index];
+		//strcpy(r.fname,t->reqqueue.fcfs[index].fname);
+		t->reqqueue.fcfs.erase(t->reqqueue.fcfs.begin()+index);
 	}
-	(t->reqqueue.njob)++;
-	sem_post(t->reqqueue.queueSem);
-
-	int sval;
-	sem_getvalue(t->reqqueue.queueSem, &sval);
-}
-
-int remque(struct tpool* t)
-{
-	struct treq *oldback;
-	oldback = t->reqqueue.front;
-	switch(t->reqqueue.njob) //remove from front
+	else
 	{
-		case 0:     //empty queue
-			return -1;
-			break;
-		case 1:     //only one request
-			t->reqqueue.front=NULL;
-			t->reqqueue.back=NULL;
-			break;
-		default: 	//>1 requests in queue
-			oldback->prev->next=NULL;
-			t->reqqueue.front=oldback->prev;
-			break;
+		r=(*t->reqqueue.sjf.begin()).second;
+		t->reqqueue.sjf.erase(t->reqqueue.sjf.begin());
 	}
-
-	(t->reqqueue.njob)--;
-	int sval;
-	sem_getvalue(t->reqqueue.queueSem, &sval);
-	return 0;
-}
-
-struct treq* getlast(struct tpool* t)
-{
-	return t->reqqueue.front;
+	t->reqqueue.njob--;
+	return r;
 }
 
 void delqueue(struct tpool* t)
 {
-	struct treq* curreq;
-	curreq=t->reqqueue.front;
-	while(t->reqqueue.njob)
-	{
-		t->reqqueue.front=curreq->prev;
-		free(curreq);
-		curreq=t->reqqueue.front;
-		t->reqqueue.njob--;
-	}
-	t->reqqueue.back=NULL;
-	t->reqqueue.front=NULL;
+	t->reqqueue.fcfs.clear();
+	t->reqqueue.sjf.clear();
 }
 
-void *protocol(void * arg)
+void *protocol(struct request r)
 {
-    int client_s=(int) arg;         //copy socket
-
+    int client_s=(int)r.arg;         //copy socket
     char ibuf[BUFSIZE];          // for GET request
     char obuf[BUFSIZE];          // for HTML response
-    char *fname;
+    char *fname=r.fname;
     int fd;
     int buffile;
-    int retcode;
     char line[256];
-
-    retcode = recv(client_s, ibuf, BUFSIZE, 0);	//HTTP request
-    sscanf(ibuf,"%s",line);
-    strncpy(log_data.method, line, sizeof(line));
-    log_data.size = strlen(ibuf);
-    if (retcode < 0)
-  	  printf("recv error detected ...\n");
+    string ls=exec("ls");
+    fd = open(&fname[0], O_RDONLY, S_IREAD | S_IWRITE);
+    if (fd == -1)
+    {
+        	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL) || (strstr(fname , ".html") !=NULL))
+        	{
+        		printf("File %s not found\n", &fname[1]);
+        		log_data.status = 404;
+        		strcpy(obuf, NOTOK_404);
+        		send(client_s, obuf, strlen(obuf), 0);
+        		strcpy(obuf, FNF_404);
+        		send(client_s, obuf, strlen(obuf), 0);
+        	}
+        	else
+        	{
+        		log_data.status = 404;
+        		strcpy(obuf, OK_HTML);
+        		send(client_s, obuf, strlen(obuf), 0);
+        		sprintf(obuf,"<html><body> %s </body></html>",(char*)ls.c_str());
+        		printf("%s",obuf);
+        		send(client_s, obuf, buffile, 0);
+        	}
+    }
     else
     {
-    	//get the file name
-        strtok(ibuf, " ");
-        fname = strtok(NULL, " ");
-        fd = open(&fname[0], O_RDONLY, S_IREAD | S_IWRITE);
-        if (fd == -1)
-        {
-          printf("File %s not found\n", &fname[1]);
-          log_data.status = 404;
-          strcpy(obuf, NOTOK_404);
-          send(client_s, obuf, strlen(obuf), 0);
-          strcpy(obuf, FNF_404);
-          send(client_s, obuf, strlen(obuf), 0);
-        }
-        else
-        {
-        	printf("File %s is being sent \n", &fname[1]);
-        	log_data.status = 200;
-        	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
-        		strcpy(obuf, OK_IMAGE);
-        	else
-        		strcpy(obuf, OK_HTML);
-        	send(client_s, obuf, strlen(obuf), 0);
-        	buffile = 1;
-        	while (buffile > 0)
-        	{
-        		buffile = read(fd, obuf, BUFSIZE);
-        		if (buffile > 0)
-        		{
-        			send(client_s, obuf, buffile, 0);
-        		}
-        	}
-        }
+       	printf("File %s is being sent \n", &fname[1]);
+       	log_data.status = 200;
+       	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
+       		strcpy(obuf, OK_IMAGE);
+       	else
+       		strcpy(obuf, OK_HTML);
+       	send(client_s, obuf, strlen(obuf), 0);
+       	buffile = 1;
+       	while (buffile > 0)
+       	{
+       		buffile = read(fd, obuf, BUFSIZE);
+       		if (buffile > 0)
+       		{
+       			send(client_s, obuf, buffile, 0);
+       		}
+       	}
     }
     log_status();
     close(fd);
@@ -239,8 +203,6 @@ struct tpool *poolinit()
 	t->nthreads=nthreads;
 
 	// Initialise the request queue
-	t->reqqueue.back=NULL;
-	t->reqqueue.front=NULL;
 	t->reqqueue.njob=0;
 	t->reqqueue.queueSem=(sem_t*)malloc(sizeof(sem_t));
 	sem_init(t->reqqueue.queueSem, 0, 0);
@@ -258,6 +220,11 @@ void* handlereq(void *th)
 	struct tpool*t=(struct tpool *)th;
 	while(execution)
 	{
+                if(quetime)
+                {
+                    sleep(quetime);
+                    quetime=0;
+                }
 		if (sem_wait(t->reqqueue.queueSem)) 		//waiting for a request
 		{
 			perror("handlereq(): Error in semaphore");
@@ -265,17 +232,13 @@ void* handlereq(void *th)
 		}
 		if (execution)		// Read and handle request from queue
 		{
-			void*  arg_buff;
-			struct treq* req;
+			struct request r;
 			pthread_mutex_lock(&get_mutex);                 // get mutex lock
-			req = getlast(t);
-			arg_buff =req->arg;
+			r = getlast(t);
 			log_data.sched_time = time(NULL);
-			log_data.sock_fd = (int)req->arg;
-			remque(t);
+			log_data.sock_fd = (int)r.arg;
 			pthread_mutex_unlock(&get_mutex);               //release mutex
-			protocol(arg_buff);               			 	//execute function
-			free(req);
+			protocol(r);               			 	//execute function
 		}
 		else
 		{
@@ -284,21 +247,21 @@ void* handlereq(void *th)
 	}
 }
 
-int quereq(struct tpool* t, void* iarg)
+int quereq(struct tpool* t,struct request r, int size)
 {
-	struct treq* nreq;
-	nreq=(struct treq*)malloc(sizeof(struct treq));
-	if (nreq==NULL)
-	{
-		fprintf(stderr, "quereq(): Memory allocation for new request failed\n");
-		exit(1);
-	}
-
-	nreq->arg=iarg;
-
-	// add request to queue
 	pthread_mutex_lock(&get_mutex);
-	addque(t, nreq);
+	if(sch==1)
+	{
+		t->reqqueue.fcfs.push_back(r);
+	}
+	else
+	{
+		t->reqqueue.sjf[size]=r;
+	}
+	t->reqqueue.njob++;
+	sem_post(t->reqqueue.queueSem);
+	int sval;
+	sem_getvalue(t->reqqueue.queueSem, &sval);
 	pthread_mutex_unlock(&get_mutex);
 
 	return 0;
@@ -354,7 +317,9 @@ int main(int argc,char *argv[])
 		progname = argv[0];
 	else
 		progname++;
-	while ((ch = getopt(argc, argv, "adsn:p:h:l:")) != -1)
+	server = 1;
+        cout<<argv<< " "<< argc<<endl;
+	while ((ch = getopt(argc, argv, "ads:n:p:l:t:")) != -1)
 		switch(ch) {
 			case 'a':
 				aflg++;		/* print address in output */
@@ -363,7 +328,10 @@ int main(int argc,char *argv[])
 				soctype = SOCK_DGRAM;
 				break;
 			case 's':
-				server = 1;
+                                if(strcmp(optarg,"FCFS"))
+                                    sch=1;
+                                else if(strcmp(optarg,"SJF"))
+                                    sch=2;
 				break;
 			case 'n':
 				nthreads = atoi(optarg);
@@ -373,6 +341,9 @@ int main(int argc,char *argv[])
 				break;
 			case 'l':
 				strncpy(log_file, optarg, sizeof(log_file));
+				break;
+			case 't':
+				quetime = atoi(optarg);
 				break;
 			case '?':
 			default:
@@ -384,14 +355,13 @@ int main(int argc,char *argv[])
 		usage();
 	if (!server && port == NULL)
 		usage();
-	if (server)
-		usage();
 	if (log_file[0])
 	{
-		  log_file_fd = fopen(log_file, "w");
+		  log_file_fd = fopen(log_file, "wb");
 	      if(!log_file_fd)
 	          perror("couldn't open log file");
 	}
+        cout<<sch;
 
 /*
  * Create socket on local host.
@@ -418,47 +388,9 @@ int main(int argc,char *argv[])
 		pthread_join(schque, NULL);
 		printf("Completed join with thread %d\n",i);
 	}
-/*
- * Set up select(2) on both socket and terminal, anything that comes
- * in on socket goes to terminal, anything that gets typed on terminal
- * goes out socket...
- */
-	/*while (!done) {
-		FD_ZERO(&ready);
-		FD_SET(sock, &ready);
-		FD_SET(fileno(stdin), &ready);
-		if (select((sock + 1), &ready, 0, 0, 0) < 0) {
-			perror("select");
-			exit(1);
-		}
-		if (FD_ISSET(fileno(stdin), &ready)) {
-			if ((bytes = read(fileno(stdin), buf, BUF_LEN)) <= 0)
-				done++;
-			send(sock, buf, bytes, 0);
-		}
-		msgsize = sizeof(msgfrom);
-		if (FD_ISSET(sock, &ready)) {
-			if ((bytes = recvfrom(sock, buf, BUF_LEN, 0, (struct sockaddr *)&msgfrom, &msgsize)) <= 0) {
-				done++;
-			} else if (aflg) {
-				fromaddr.addr = ntohl(msgfrom.sin_addr.s_addr);
-				fprintf(stderr, "%d.%d.%d.%d: ", 0xff & (unsigned int)fromaddr.bytes[0],
-			    	0xff & (unsigned int)fromaddr.bytes[1],
-			    	0xff & (unsigned int)fromaddr.bytes[2],
-			    	0xff & (unsigned int)fromaddr.bytes[3]);
-			}
-			write(fileno(stdout), buf, bytes);
-		}
-	}*/
 	fclose(log_file_fd);
 	return(0);
 }
-
-/*
- * setup_client() - set up socket for the mode of soc running as a
- *		client connecting to a port on a remote machine.
- */
-
 
 void *queue(void *tp)
 {
@@ -466,12 +398,51 @@ void *queue(void *tp)
 	int suc=0;
 	size_t stacksize;
 	struct tpool *thread_pool=(struct tpool *)tp;
+	char ibuf[BUFSIZE];
+	char *fname,temp[30];
+	int buffile;
+	int retcode;
+	char line[256];
+	string dir=exec("pwd");
+	string ret="\n";
+	struct request r;
+	dir.erase(dir.find(ret));
+	char* home="home";
+	char* found;
+	int size=0;
+	FILE *fd;
 	while(1)
 	{
 		if(newsock)
 		{
 			newsock=0;
-			quereq(thread_pool,(void*)clsock);
+			retcode = recv((int)clsock, ibuf, BUFSIZE, 0);	//HTTP request
+			sscanf(ibuf,"%s",line);
+			sscanf(ibuf,"%s %s %s",log_data.method);
+			log_data.size = strlen(ibuf);
+			if (retcode < 0)
+				printf("recv error detected ...\n");
+			else
+			{
+			   	//get the file name
+                                strtok(ibuf, " ");
+			    fname = strtok(NULL, " ");
+			    found=strstr(fname,home);
+			    if(!found)
+			    {
+			    	strcpy(temp,fname);
+			        fname[0]='\0';
+			        sprintf(fname,"%s%s",(char*)dir.c_str(),temp);
+			    }
+			    fd=fopen(fname,"rb");
+			    fseek(fd,0,SEEK_END);
+			    size=ftell(fd);
+			    cout<<size;
+			    fclose(fd);
+			}
+			r.arg=(void*)clsock;
+			strcpy(r.fname,fname);
+			quereq(thread_pool,r,size);
 			if(suc==0)
 				printf("\n%d Request\n",top);
 			top++;
