@@ -23,10 +23,11 @@
 #include 	<sys/stat.h>
 
 using namespace std;
-#define OK_IMAGE    "HTTP/1.0 200 OK\nContent-Type:image/gif\n\n"
-#define OK_HTML     "HTTP/1.0 200 OK\nContent-Type:text/html\n\n"
-#define NOTOK_404   "HTTP/1.0 404 Not Found\nContent-Type:text/html\n\n"
-#define FNF_404    "<html><body><h1>FILE NOT FOUND</h1></body></html>"
+#define HTTP_OK	 "HTTP/1.0 200 OK\n"
+#define HTTP_NOTOK "HTTP/1.0 404 Not Found\n"
+#define IMAGE    "Content-Type:image/gif\n"
+#define HTML     "Content-Type:text/html\n"
+#define FNF_404    	"<html><body><h1>FILE NOT FOUND</h1></body></html>"
 #define BUFSIZE 1024
 char *progname;
 char buf[BUF_LEN];
@@ -38,7 +39,7 @@ void usage();
 void *setup_server(void *);
 void *queue(void *);
 
-int s, sock, ch, server, done, bytes, aflg,nthreads=4,debug=0;;
+int s, sock, ch, server, done, bytes, aflg,nthreads=4,debug=0,dflag=0;
 int soctype = SOCK_STREAM;
 char *port = NULL,sched[5];
 extern char *optarg;
@@ -48,6 +49,8 @@ static int execution=1;
 struct request{
 	void * arg;
 	char fname[BUFSIZE];
+	int rtype;
+	int size;
 };
 
 struct trque{
@@ -90,24 +93,28 @@ string exec(char* cmd) {
 }
 void log_status(int index)
 {
-	char logs[1024],err;
-	log_file_fd = fopen(log_file, "a+");
+	char logs[1024];
+	static int lcount=0;
+	if(lcount==0)
+	{
+		log_file_fd = fopen(log_file, "w");
+		lcount++;
+	}
+	else
+		log_file_fd = fopen(log_file, "a");
 	if(!log_file_fd)
 		perror("couldn't open log file");
-
-		sprintf(logs,"%s %s %s %s %d %zu\n",
+	sprintf(logs,"%s %s %s %s %d %zu\n",
 		inet_ntoa (log_data[index].client_address),
 		log_data[index].receipt_time,
 		log_data[index].sched_time,
 		log_data[index].method,
 		log_data[index].status,
 		log_data[index].size);
-		//printf("\nLOG:%s\n",logs);
-		err=fprintf(log_file_fd,"%s",logs);//fwrite(logs,sizeof(logs),1,log_file_fd);
-		/*if(err!=sizeof(logs))
-		{
-			printf("Writing error!");
-		}*/
+	if(debug==1)
+		printf("%s",logs);
+	else
+		fprintf(log_file_fd,"%s",logs);
 
 	fclose(log_file_fd);
 }
@@ -121,7 +128,6 @@ struct request getlast(struct tpool* t)
 	if(sch==1)
 	{
 		r=t->reqqueue.fcfs[index];
-		//strcpy(r.fname,t->reqqueue.fcfs[index].fname);
 		t->reqqueue.fcfs.erase(t->reqqueue.fcfs.begin()+index);
 	}
 	else
@@ -143,7 +149,7 @@ void *protocol(struct request r)
 {
     int client_s=(int)r.arg;         //copy socket
     char ibuf[BUFSIZE];          // for GET request
-    char obuf[BUFSIZE];          // for HTML response
+    char obuf[BUF_LEN];          // for HTML response
     char *fname=r.fname;
     int fd;
     int buffile;
@@ -152,15 +158,47 @@ void *protocol(struct request r)
     int status;
     struct stat st_buf;
     time_t curt=time(NULL);
+    char SERVER[50];
+    gethostname(SERVER,client_s);
     strcpy(log_data[(int)r.arg].sched_time,asctime(gmtime(&curt)));
-    /*string ls=exec("ls");
-    cout<<"Using ls"<<ls;*/
     status = stat (r.fname, &st_buf);
+    char timeStr[ 100 ];
+    time_t ltime;
+    char datebuf [9];
+    char timebuf [9];
+    strftime(timeStr, 100, "%d-%m-%Y %H:%M:%S", localtime( &st_buf.st_mtime));
     if (status != 0)
     {
-    	printf ("Error, not an existing file or directory");
+    	printf("Error, not an existing file or directory!");
     }
-    else
+    else if(r.rtype==0)
+    {
+    	printf("Error in Request type or Protocol not supported!");
+    }
+    else if(r.rtype==1)
+    {
+    	fd = open(&r.fname[0], O_RDONLY, S_IREAD | S_IWRITE);
+    	if (fd == -1)
+    	{
+    		if ((strstr(r.fname, ".jpg") != NULL) ||(strstr(r.fname, ".gif") != NULL) || (strstr(r.fname, ".png") != NULL) || (strstr(r.fname , ".html") !=NULL))
+    	    {
+    	    	sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_NOTOK,asctime(gmtime(&curt)),SERVER,timeStr,HTML,r.size);
+    	    	send(client_s, obuf, strlen(obuf), 0);
+    	    	log_data[(int)r.arg].status = 404;
+    	    }
+    	}
+    	else
+    	{
+    		log_data[(int)r.arg].status = 200;
+    		if ((strstr(r.fname, ".jpg") != NULL) ||(strstr(r.fname, ".gif") != NULL) || (strstr(r.fname, ".png") != NULL))
+    	    	sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,IMAGE,r.size);
+    	    else
+    	    	sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,HTML,r.size);
+    		send(client_s, obuf, strlen(obuf), 0);
+    	}
+    	close(fd);
+    }
+    else if(r.rtype==2)
     {
     	if (S_ISREG (st_buf.st_mode))
     	{
@@ -171,7 +209,7 @@ void *protocol(struct request r)
     			{
     				printf("File %s not found\n", &r.fname[1]);
     				log_data[(int)r.arg].status = 404;
-    				strcpy(obuf, NOTOK_404);
+    				sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_NOTOK,asctime(gmtime(&curt)),SERVER,timeStr,HTML,r.size);
     				send(client_s, obuf, strlen(obuf), 0);
     				strcpy(obuf, FNF_404);
     				send(client_s, obuf, strlen(obuf), 0);
@@ -179,12 +217,11 @@ void *protocol(struct request r)
     		}
     		else
     		{
-    			//printf("File %s is being sent \n", &fname[1]);
     			log_data[(int)r.arg].status = 200;
     			if ((strstr(r.fname, ".jpg") != NULL) ||(strstr(r.fname, ".gif") != NULL) || (strstr(r.fname, ".png") != NULL))
-    				strcpy(obuf, OK_IMAGE);
+    				sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,IMAGE,r.size);
     			else
-    				strcpy(obuf, OK_HTML);
+    				sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,HTML,r.size);
     			send(client_s, obuf, strlen(obuf), 0);
     			buffile = 1;
     			while (buffile > 0)
@@ -211,7 +248,7 @@ void *protocol(struct request r)
     				flag=1;
     				sprintf(obuf,"%s%s",fname,dirp->d_name);
     				fd = open(&obuf[0], O_RDONLY, S_IREAD | S_IWRITE);
-    				strcpy(obuf, OK_HTML);
+    				sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,HTML,r.size);
     				send(client_s, obuf, strlen(obuf), 0);
     				buffile = 1;
     				while (buffile > 0)
@@ -229,7 +266,7 @@ void *protocol(struct request r)
     		{
     			if((dp  = opendir(r.fname)) == NULL)
     			    cout << "Error in opening " << r.fname << endl;
-    			strcpy(obuf, OK_HTML);
+    			sprintf(obuf,"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",HTTP_OK,asctime(gmtime(&curt)) ,SERVER,timeStr,HTML,r.size);
     			send(client_s, obuf, strlen(obuf), 0);
     			strcpy(obuf,"<html><body> <h1>Directory Contents</h1>");
     			send(client_s, obuf, strlen(obuf), 0);
@@ -248,12 +285,10 @@ void *protocol(struct request r)
     			closedir(dp);
     		}
     	}
+    	close(fd);
     }
     log_status((int)r.arg);
-    close(fd);
     close(client_s);
-    if(debug==0)
-      	newsock=2;
 }
 
 struct tpool *poolinit()
@@ -272,7 +307,7 @@ struct tpool *poolinit()
 	t->reqqueue.njob=0;
 	t->reqqueue.queueSem=(sem_t*)malloc(sizeof(sem_t));
 	sem_init(t->reqqueue.queueSem, 0, 0);
-	/* Make threads in pool */
+	// Create threads in pool
 	int i;
 	for (i=0;i<nthreads;i++){
 		printf("Created thread %d in pool \n", i);
@@ -390,6 +425,7 @@ int main(int argc,char *argv[])
 				break;
 			case 'd':
 				debug = 1;
+				dflag=1;
 				break;
 			case 'r':
 				strcpy(rootdir,optarg);
@@ -439,13 +475,14 @@ int main(int argc,char *argv[])
 		pthread_attr_setstacksize (&attr, stacksize);
 		pthread_attr_getstacksize (&attr, &stacksize);
 		int f=1;
+		if(debug==1)
+			nthreads=1;
 		pthread_create(&listhread,&attr,setup_server,(void*)f);
 		threadpool=poolinit();
 		pthread_create(&schque,&attr,queue,(void *)threadpool);
 		pthread_attr_destroy(&attr);
 		pthread_join(listhread, NULL);
 		pthread_join(schque, NULL);
-		printf("Completed join with thread %d\n",i);
 	}
 	fclose(log_file_fd);
 	return(0);
@@ -454,14 +491,12 @@ int main(int argc,char *argv[])
 void *queue(void *tp)
 {
 	static int top=1;
-	int suc=0;
-	size_t stacksize;
 	struct tpool *thread_pool=(struct tpool *)tp;
 	char ibuf[BUFSIZE];
-	char *fname,temp[30];
+	char fname[BUFSIZE],temp[30];
 	int buffile;
 	int retcode;
-	char line[256];
+	char action[20],path[100],host[20];
 	string dir=exec("pwd");
 	string ret="\n";
 	struct request r;
@@ -476,22 +511,21 @@ void *queue(void *tp)
 	{
 		if(newsock==1)
 		{
-			if(debug)
+			if(!debug)
 				newsock=0;
 			retcode = recv((int)clsock, ibuf, BUFSIZE, 0);	//HTTP request
-			sscanf(ibuf,"%s",line);
+			sscanf(ibuf,"%s %s %s",action,fname,host);
 			int i=0;
-			for(;ibuf[i]!='\r';i++)
+			/*for(;ibuf[i]!='\r';i++)
 				log_data[(int)clsock].method[i]=ibuf[i];
-			log_data[(int)clsock].method[i]='\0';
+			log_data[(int)clsock].method[i]='\0';*/
+			sprintf(log_data[(int)clsock].method,"%s %s %s",action,fname,host);
 			if (retcode < 0)
 				printf("recv error detected ...\n");
 			else
 			{
 			   	//get the file name
-                strtok(ibuf, " ");
-			    fname = strtok(NULL, " ");
-			    found=strstr(fname,home);
+                found=strstr(fname,home);
 			    if(!found)
 			    {
 			    	strcpy(temp,fname);
@@ -525,9 +559,19 @@ void *queue(void *tp)
 			}
 			r.arg=(void*)clsock;
 			strcpy(r.fname,fname);
+			r.size=size;
+			if(strcmp(host,"HTTP/1.0")==0 || strcmp(host,"HTTP/1.1")==0)
+			{
+				if(strcmp(action,"HEAD")==0)
+					r.rtype=1;
+				else if(strcmp(action,"GET")==0)
+					r.rtype=2;
+				else
+					r.rtype=0;
+			}
+			else
+				r.rtype=0;
 			quereq(thread_pool,r,size);
-			printf("\n%d Request\n",top);
-			top++;
 		}
 		else if(newsock==2)
 			break;
@@ -578,7 +622,15 @@ void *setup_server(void *f) {
 		{
 			if (soctype == SOCK_STREAM) {
 				fprintf(stderr, "Entering accept() waiting for connection.\n");
-				clsock = accept(s, (struct sockaddr *)&remote, &len);
+				if(debug==1&&dflag==1)
+				{
+					clsock = accept(s, (struct sockaddr *)&remote, &len);
+					dflag=0;
+				}
+				else if(debug==1&&dflag==0)
+					break;
+				else if(debug==0)
+					clsock = accept(s, (struct sockaddr *)&remote, &len);
 				if(clsock!=-1)
 					newsock=1;
 				address_length = sizeof (socket_address);
@@ -593,6 +645,7 @@ void *setup_server(void *f) {
 		else if(newsock==2)
 			break;
 	}
+	close(s);
 	pthread_exit(NULL);
 }
 
