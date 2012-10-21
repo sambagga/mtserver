@@ -4,9 +4,11 @@
 #include	<map>
 #include	<stdio.h>
 #include	<unistd.h>
+#include	<dirent.h>
 #include	<stdlib.h>
 #include	<string.h>
 #include	<ctype.h>
+#include 	<termios.h>
 #include	<fcntl.h>
 #include	<assert.h>
 #include	<sys/types.h>
@@ -28,13 +30,15 @@ using namespace std;
 #define BUFSIZE 1024
 char *progname;
 char buf[BUF_LEN];
+char log_file[256];
+char rootdir[256];
 pthread_mutex_t get_mutex=PTHREAD_MUTEX_INITIALIZER;
 
 void usage();
 void *setup_server(void *);
 void *queue(void *);
 
-int s, sock, ch, server, done, bytes, aflg,nthreads=4;
+int s, sock, ch, server, done, bytes, aflg,nthreads=4,debug=0;;
 int soctype = SOCK_STREAM;
 char *port = NULL,sched[5];
 extern char *optarg;
@@ -87,24 +91,25 @@ string exec(char* cmd) {
 void log_status(int index)
 {
 	char logs[1024],err;
-	sprintf(logs,"%s %s %s %s %d %zu",
-		inet_ntoa (log_data[index].client_address),
-	    log_data[index].receipt_time,
-	    log_data[index].sched_time,
-	    log_data[index].method,
-	    log_data[index].status,
-	    log_data[index].size);
-	printf("\nLOG:%s\n",logs);
+	log_file_fd = fopen(log_file, "a+");
 	if(!log_file_fd)
-	{
-		printf("File error!");
-		return;
-	}
-	err=fprintf(log_file_fd,"%s",logs);//fwrite(logs,sizeof(logs),1,log_file_fd);
-	if(err!=sizeof(logs))
-	{
-		printf("Writing error!");
-	}
+		perror("couldn't open log file");
+
+		sprintf(logs,"%s %s %s %s %d %zu\n",
+		inet_ntoa (log_data[index].client_address),
+		log_data[index].receipt_time,
+		log_data[index].sched_time,
+		log_data[index].method,
+		log_data[index].status,
+		log_data[index].size);
+		//printf("\nLOG:%s\n",logs);
+		err=fprintf(log_file_fd,"%s",logs);//fwrite(logs,sizeof(logs),1,log_file_fd);
+		/*if(err!=sizeof(logs))
+		{
+			printf("Writing error!");
+		}*/
+
+	fclose(log_file_fd);
 }
 
 void* handlereq(void *th);
@@ -143,55 +148,112 @@ void *protocol(struct request r)
     int fd;
     int buffile;
     char line[256];
-
+    char *ptr,lsbuf[BUF_LEN];
+    int status;
+    struct stat st_buf;
     time_t curt=time(NULL);
     strcpy(log_data[(int)r.arg].sched_time,asctime(gmtime(&curt)));
-    string ls=exec("ls");
-    fd = open(&fname[0], O_RDONLY, S_IREAD | S_IWRITE);
-    if (fd == -1)
+    /*string ls=exec("ls");
+    cout<<"Using ls"<<ls;*/
+    status = stat (r.fname, &st_buf);
+    if (status != 0)
     {
-        	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL) || (strstr(fname , ".html") !=NULL))
-        	{
-        		printf("File %s not found\n", &fname[1]);
-        		log_data[(int)r.arg].status = 404;
-        		strcpy(obuf, NOTOK_404);
-        		send(client_s, obuf, strlen(obuf), 0);
-        		strcpy(obuf, FNF_404);
-        		send(client_s, obuf, strlen(obuf), 0);
-        	}
-        	else
-        	{
-        		log_data[(int)r.arg].status = 404;
-        		strcpy(obuf, OK_HTML);
-        		send(client_s, obuf, strlen(obuf), 0);
-        		sprintf(obuf,"<html><body> %s </body></html>",(char*)ls.c_str());
-        		printf("%s",obuf);
-        		send(client_s, obuf, buffile, 0);
-        	}
+    	printf ("Error, not an existing file or directory");
     }
     else
     {
-       	//printf("File %s is being sent \n", &fname[1]);
-       	log_data[(int)r.arg].status = 200;
-       	if ((strstr(fname, ".jpg") != NULL) ||(strstr(fname, ".gif") != NULL) || (strstr(fname, ".png") != NULL))
-       		strcpy(obuf, OK_IMAGE);
-       	else
-       		strcpy(obuf, OK_HTML);
-       	send(client_s, obuf, strlen(obuf), 0);
-       	buffile = 1;
-       	while (buffile > 0)
-       	{
-       		buffile = read(fd, obuf, BUFSIZE);
-       		if (buffile > 0)
-       		{
-       			send(client_s, obuf, buffile, 0);
-       		}
-       	}
+    	if (S_ISREG (st_buf.st_mode))
+    	{
+    		fd = open(&r.fname[0], O_RDONLY, S_IREAD | S_IWRITE);
+    		if (fd == -1)
+    		{
+    			if ((strstr(r.fname, ".jpg") != NULL) ||(strstr(r.fname, ".gif") != NULL) || (strstr(r.fname, ".png") != NULL) || (strstr(r.fname , ".html") !=NULL))
+    			{
+    				printf("File %s not found\n", &r.fname[1]);
+    				log_data[(int)r.arg].status = 404;
+    				strcpy(obuf, NOTOK_404);
+    				send(client_s, obuf, strlen(obuf), 0);
+    				strcpy(obuf, FNF_404);
+    				send(client_s, obuf, strlen(obuf), 0);
+    			}
+    		}
+    		else
+    		{
+    			//printf("File %s is being sent \n", &fname[1]);
+    			log_data[(int)r.arg].status = 200;
+    			if ((strstr(r.fname, ".jpg") != NULL) ||(strstr(r.fname, ".gif") != NULL) || (strstr(r.fname, ".png") != NULL))
+    				strcpy(obuf, OK_IMAGE);
+    			else
+    				strcpy(obuf, OK_HTML);
+    			send(client_s, obuf, strlen(obuf), 0);
+    			buffile = 1;
+    			while (buffile > 0)
+    			{
+    				buffile = read(fd, obuf, BUFSIZE);
+    			    if (buffile > 0)
+    			    {
+    			    	send(client_s, obuf, buffile, 0);
+    			    }
+    			}
+    		}
+    	}
+    	if (S_ISDIR (st_buf.st_mode))
+    	{
+    		DIR *dp;
+    		int flag=0;
+    		struct dirent *dirp;
+    		if((dp  = opendir(r.fname)) == NULL)
+    			cout << "Error in opening " << r.fname << endl;
+    		while ((dirp = readdir(dp)) != NULL)
+    		{
+    			if(strcmp(dirp->d_name,"index.html")==0)
+    		    {
+    				flag=1;
+    				sprintf(obuf,"%s%s",fname,dirp->d_name);
+    				fd = open(&obuf[0], O_RDONLY, S_IREAD | S_IWRITE);
+    				strcpy(obuf, OK_HTML);
+    				send(client_s, obuf, strlen(obuf), 0);
+    				buffile = 1;
+    				while (buffile > 0)
+    				{
+    					buffile = read(fd, obuf, BUFSIZE);
+    				   	if (buffile > 0)
+    				    {
+    				       	send(client_s, obuf, buffile, 0);
+    				    }
+    				}
+    				break;
+    		    }
+    		}
+    		if(flag!=1)
+    		{
+    			if((dp  = opendir(r.fname)) == NULL)
+    			    cout << "Error in opening " << r.fname << endl;
+    			strcpy(obuf, OK_HTML);
+    			send(client_s, obuf, strlen(obuf), 0);
+    			strcpy(obuf,"<html><body> <h1>Directory Contents</h1>");
+    			send(client_s, obuf, strlen(obuf), 0);
+    			obuf[0]='\0';
+    			while ((dirp = readdir(dp)) != NULL)
+    			{
+    				if(dirp->d_name[0]!='.')
+    				{
+    					sprintf (obuf,"<a href=%s%s>%s</a><br>",r.fname,dirp->d_name,dirp->d_name);
+    					send(client_s, obuf, strlen(obuf), 0);
+    					obuf[0]='\0';
+    				}
+    			}
+    			sprintf(obuf,"</body></html>");
+    			send(client_s, obuf, strlen(obuf), 0);
+    			closedir(dp);
+    		}
+    	}
     }
     log_status((int)r.arg);
     close(fd);
     close(client_s);
-    pthread_exit(NULL);
+    if(debug==0)
+      	newsock=2;
 }
 
 struct tpool *poolinit()
@@ -222,13 +284,13 @@ struct tpool *poolinit()
 void* handlereq(void *th)
 {
 	struct tpool*t=(struct tpool *)th;
-	while(execution)
+	while(execution || newsock==2)
 	{
-                if(quetime)
-                {
-                    sleep(quetime);
-                    quetime=0;
-                }
+        if(quetime)
+        {
+        	sleep(quetime);
+            quetime=0;
+        }
 		if (sem_wait(t->reqqueue.queueSem)) 		//waiting for a request
 		{
 			perror("handlereq(): Error in semaphore");
@@ -248,6 +310,7 @@ void* handlereq(void *th)
 			break;
 		}
 	}
+	pthread_exit(NULL);
 }
 
 int quereq(struct tpool* t,struct request r, int size)
@@ -307,7 +370,6 @@ int main(int argc,char *argv[])
 	struct sockaddr_in msgfrom;
 	int msgsize,i;
 	struct tpool *threadpool;
-	char log_file[256];
 
 	log_file[0] = '\0';
 
@@ -321,13 +383,16 @@ int main(int argc,char *argv[])
 	else
 		progname++;
 	server = 1;
-	while ((ch = getopt(argc, argv, "adhs:n:p:l:t:")) != -1)
+	while ((ch = getopt(argc, argv, "adhr:s:n:p:l:t:")) != -1)
 		switch(ch) {
 			case 'a':
 				aflg++;		/* print address in output */
 				break;
 			case 'd':
-				soctype = SOCK_DGRAM;
+				debug = 1;
+				break;
+			case 'r':
+				strcpy(rootdir,optarg);
 				break;
 			case 's':
                                 if(strcmp(optarg,"FCFS"))
@@ -357,12 +422,6 @@ int main(int argc,char *argv[])
 		usage();
 	if (!server && port == NULL)
 		usage();
-	if (log_file[0])
-	{
-		  log_file_fd = fopen(log_file, "wb");
-	      if(!log_file_fd)
-	          perror("couldn't open log file");
-	}
 /*
  * Create socket on local host.
  */
@@ -411,11 +470,14 @@ void *queue(void *tp)
 	char* found;
 	int size=0;
 	FILE *fd;
+	int status;
+	struct stat st_buf;
 	while(1)
 	{
-		if(newsock)
+		if(newsock==1)
 		{
-			newsock=0;
+			if(debug)
+				newsock=0;
 			retcode = recv((int)clsock, ibuf, BUFSIZE, 0);	//HTTP request
 			sscanf(ibuf,"%s",line);
 			int i=0;
@@ -434,13 +496,32 @@ void *queue(void *tp)
 			    {
 			    	strcpy(temp,fname);
 			        fname[0]='\0';
-			        sprintf(fname,"%s%s",(char*)dir.c_str(),temp);
+			        if(*rootdir=='\0')
+			        	sprintf(rootdir,"%s",(char*)dir.c_str());
+			        sprintf(fname,"%s%s",rootdir,temp);
 			    }
-			    fd=fopen(fname,"rb");
-			    fseek(fd,0,SEEK_END);
-			    size=ftell(fd);
+			        cout<<fname;
+			        status = stat (fname, &st_buf);
+			        if (status != 0)
+			        {
+			           	printf ("Error, not an existing file or directory");
+			           	continue;
+			        }
+			        else
+			        {
+			        	if (S_ISREG (st_buf.st_mode)) {
+			        		cout<<"File!";
+			        		fd=fopen(fname,"rb");
+			        		fseek(fd,0,SEEK_END);
+			        		size=ftell(fd);
+			        		fclose(fd);
+			        	}
+			        	if (S_ISDIR (st_buf.st_mode)) {
+			        		cout<<"Directory!";
+			        		size=0;
+			        	}
+			        }
 			    log_data[(int)clsock].size=size;
-			    fclose(fd);
 			}
 			r.arg=(void*)clsock;
 			strcpy(r.fname,fname);
@@ -448,7 +529,10 @@ void *queue(void *tp)
 			printf("\n%d Request\n",top);
 			top++;
 		}
+		else if(newsock==2)
+			break;
 	}
+	execution=0;
 	delpool(thread_pool);
 	pthread_exit(NULL);
 }
@@ -506,6 +590,8 @@ void *setup_server(void *f) {
 				strcpy(log_data[(int)clsock].receipt_time,asctime(gmtime(&curt)));
 			}
 		}
+		else if(newsock==2)
+			break;
 	}
 	pthread_exit(NULL);
 }
