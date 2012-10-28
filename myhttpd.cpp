@@ -49,7 +49,7 @@ extern int optind;
 int newsock=0, clsock, sch=1, quetime=60;
 static int execution=1;
 struct request {
-	void * arg;
+	int clientfd;
 	char fname[BUFSIZE];
 	int rtype;
 	int size;
@@ -156,7 +156,7 @@ void delqueue(struct tpool* t) {
 }
 
 void *protocol(struct request r) {
-	int client_s = (int) r.arg; //copy socket
+	int client_s = r.clientfd; //copy socket
 	char ibuf[BUFSIZE]; // for GET request
 	char obuf[BUF_LEN]; // for HTML response
 	char *fname = r.fname;
@@ -169,7 +169,7 @@ void *protocol(struct request r) {
 	time_t curt = time(NULL);
 	char SERVER[50];
 	gethostname(SERVER, client_s);
-	strcpy(log_data[(int) r.arg].sched_time, asctime(gmtime(&curt)));
+	strcpy(log_data[(int) r.clientfd].sched_time, asctime(gmtime(&curt)));
 	status = stat(r.fname, &st_buf);
 	char timeStr[100];
 	time_t ltime;
@@ -199,10 +199,10 @@ void *protocol(struct request r) {
 						HTTP_NOTOK, asctime(gmtime(&curt)), SERVER, timeStr,
 						HTML, r.size);
 				send(client_s, obuf, strlen(obuf), 0);
-				log_data[(int) r.arg].status = 404;
+				log_data[r.clientfd].status = 404;
 			}
 		} else {
-			log_data[(int) r.arg].status = 200;
+			log_data[r.clientfd].status = 200;
 			if ((strstr(r.fname, ".jpg") != NULL)
 					|| (strstr(r.fname, ".gif") != NULL)
 					|| (strstr(r.fname, ".png") != NULL))
@@ -229,7 +229,7 @@ void *protocol(struct request r) {
 						|| (strstr(r.fname, ".png") != NULL)
 						|| (strstr(r.fname, ".html") != NULL)) {
 					printf("File %s not found\n", &r.fname[1]);
-					log_data[(int) r.arg].status = 404;
+					log_data[r.clientfd].status = 404;
 					sprintf(
 							obuf,
 							"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",
@@ -240,7 +240,7 @@ void *protocol(struct request r) {
 					send(client_s, obuf, strlen(obuf), 0);
 				}
 			} else {
-				log_data[(int) r.arg].status = 200;
+				log_data[r.clientfd].status = 200;
 				if ((strstr(r.fname, ".jpg") != NULL)
 						|| (strstr(r.fname, ".gif") != NULL)
 						|| (strstr(r.fname, ".png") != NULL))
@@ -328,7 +328,7 @@ void *protocol(struct request r) {
 		}
 		close(fd);
 	}
-	log_status((int) r.arg);
+	log_status(r.clientfd);
 	close(client_s);
 }
 
@@ -381,7 +381,7 @@ void* handlereq(void *th) {
 			struct request r;
 			pthread_mutex_lock(&get_mutex); // get mutex lock
 			r = getlast(t);
-			log_data[(int) r.arg].sock_fd = (int) r.arg;
+			log_data[r.clientfd].sock_fd = r.clientfd;
 			pthread_mutex_unlock(&get_mutex); //release mutex
 			protocol(r); //execute function
 			if (debug == 1)
@@ -414,8 +414,9 @@ void delpool(struct tpool* t) {
 	int i;
 	execution = 0; //end thread's infinite loop
 	for (i = 0; i < (t->nthreads); i++) //idle threads waiting at semaphore
-			{
-		if (sem_post(t->reqqueue.queueSem)) {
+	{
+		if (sem_post(t->reqqueue.queueSem))
+		{
 			if (debug == 0)
 				syslog(LOG_ERR, "Error in sem_post");
 			else
@@ -431,7 +432,7 @@ void delpool(struct tpool* t) {
 	}
 
 	for (i = 0; i < (t->nthreads); i++) //join so all threads finish before exit
-			{
+	{
 		pthread_join(t->tid[i], NULL);
 	}
 
@@ -501,7 +502,7 @@ int main(int argc, char *argv[]) {
 		usage();
 	if (!server && port == NULL)
 		usage();
-	if (debug == 1) {
+	if (debug == 0) {
 		derr = daemon_init();
 		if (derr != 0)
 			printf("Error in daemon process creation!");
@@ -565,8 +566,7 @@ void *queue(void *tp) {
 			/*for(;ibuf[i]!='\r';i++)
 			 log_data[(int)clsock].method[i]=ibuf[i];
 			 log_data[(int)clsock].method[i]='\0';*/
-			sprintf(log_data[(int) clsock].method, "%s %s %s", action, fname,
-					host);
+			sprintf(log_data[(int) clsock].method, "%s %s %s", action, fname,host);
 			if (retcode < 0) {
 				if (debug == 0)
 					syslog(LOG_ERR, "Error in receive!");
@@ -603,7 +603,7 @@ void *queue(void *tp) {
 				}
 				log_data[(int) clsock].size = size;
 			}
-			r.arg = (void*) clsock;
+			r.clientfd = (int) clsock;
 			strcpy(r.fname, fname);
 			r.size = size;
 			if (strcmp(host, "HTTP/1.0") == 0
