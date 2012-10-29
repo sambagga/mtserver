@@ -29,84 +29,76 @@ using namespace std;
 #define IMAGE    "Content-Type:image/gif\n"
 #define HTML     "Content-Type:text/html\n"
 #define FNF_404    	"<html><body><h1>FILE NOT FOUND</h1></body></html>"
+#define DNF_404    	"<html><body><h1>DIRECTORY NOT FOUND</h1></body></html>"
+#define DFNF_404    "<html><body><h1>NOT A EXISTING FILE OR DIRECTORY</h1></body></html>"
 #define BUFSIZE 1024
 char *progname;
 char buf[BUF_LEN];
 char log_file[256];
-char rootdir[256];
+char rootdir[256],updir[256];
 pthread_mutex_t get_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t debug_mutex=PTHREAD_MUTEX_INITIALIZER;
 void usage();
 void *setup_server(void *);
 void *queue(void *);
 
-int s, sock, ch, server, done, bytes
-,aflg, nthreads=4, debug=0, dflag=0;
+int s, sock, ch, server, done, bytes, nthreads=4, debug=0, dflag=0;
 int soctype = SOCK_STREAM;
-char *port = "8081", sched[5];
+char *port = "8080", sched[5];
 extern char *optarg;
 extern int optind;
 int newsock=0, clsock, sch=1, quetime=60;
 static int execution=1;
+//request structure
 struct request {
-	int clientfd;
-	char fname[BUFSIZE];
-	int rtype;
-	int size;
+	int clientfd;		//Client File descriptor
+	char fname[BUFSIZE];//File name
+	int rtype;			//Request Type 0->Invalid,1->HEAD,2->GET
+	int size;			//File size
 };
 
+//Queue to store requests
 struct trque {
-	vector<struct request> fcfs;
-	map<int,struct request> sjf;
-	int njob;
-	sem_t *queueSem;
+	vector<struct request> fcfs; //For FCFS
+	map<int,struct request> sjf; //For SJF, map is always sorted
+	int nreq;					 //No of requests
+	sem_t *queueSem;			 //to inform threads about requests in queue
 };
 
 //threadpool
 		struct tpool {
-			pthread_t* tid;
-			int nthreads;
-			struct trque reqqueue;
+			pthread_t* tid;		//thread ID
+			int nthreads;		//no of threads requested, default=4;
+			struct trque reqqueue; //assign queue to pool
 		};
 
 		typedef struct logging {
-			int sock_fd;
-			char receipt_time[BUFSIZE];
-			char sched_time[BUFSIZE];
-			int status;
-			size_t size;
-			char method[256];
-			struct in_addr client_address;
+			int sock_fd;				//socket file descriptor of clients
+			char receipt_time[BUFSIZE]; //time request received
+			char sched_time[BUFSIZE];	//time request scheduled
+			int status;					//status of request returned by server
+			size_t size;				//size of file being processed
+			char method[256];			//first line of request
+			struct in_addr client_address; //address of client
 		}log;
+map<int, log>log_data;	//map to keep track of logs of different requests, indexed on client fd
 
-		FILE *log_file_fd = NULL;
-		map<int, log>log_data
-;string
-exec(char
-*
-cmd){FILE*
-pipe = popen(cmd, "r");
-if (!pipe) return "ERROR";
-char buffer[128];
-std::string result = "";
-while(!feof(pipe)) {
-	if(fgets(buffer, 128, pipe) != NULL)
-	result += buffer;
+FILE *log_file_fd = NULL;
+//To get output of system commands
+string exec(char*cmd)
+{
+	FILE* pipe = popen(cmd, "r");
+	if (!pipe) return "ERROR";
+	char buffer[128];
+	std::string result = "";
+	while(!feof(pipe)) {
+		if(fgets(buffer, 128, pipe) != NULL)
+			result += buffer;
+	}
+	pclose(pipe);
+	return result;
 }
-pclose(pipe);
-return result;
-}
-int daemon_init(void) {
-	pid_t pid;
-	if ((pid = fork()) < 0)
-		return (-1);
-	else if (pid != 0)
-		exit(0); //parent goes away
-	setsid(); //becomes session leader
-	chdir("/"); //cwd
-	umask(0); //clear file creation mask
-	return 0;
-}
+//Print log in file or terminal
 void log_status(int index) {
 	char logs[1024];
 	static int lcount = 0;
@@ -135,10 +127,10 @@ void log_status(int index) {
 }
 
 void* handlereq(void *th);
-//Queue
+//get the request to be scheduled
 struct request getlast(struct tpool* t) {
 	request r;
-	int index = t->reqqueue.njob - 1;
+	int index = t->reqqueue.nreq - 1;
 	if (sch == 1) {
 		r = t->reqqueue.fcfs[index];
 		t->reqqueue.fcfs.erase(t->reqqueue.fcfs.begin() + index);
@@ -146,49 +138,60 @@ struct request getlast(struct tpool* t) {
 		r = (*t->reqqueue.sjf.begin()).second;
 		t->reqqueue.sjf.erase(t->reqqueue.sjf.begin());
 	}
-	t->reqqueue.njob--;
+	t->reqqueue.nreq--;
 	return r;
 }
-
+//delete request from queue
 void delqueue(struct tpool* t) {
 	t->reqqueue.fcfs.clear();
 	t->reqqueue.sjf.clear();
 }
-
+//process the request and produce required output
 void *protocol(struct request r) {
 	int client_s = r.clientfd; //copy socket
 	char ibuf[BUFSIZE]; // for GET request
 	char obuf[BUF_LEN]; // for HTML response
+	char dirname[BUFSIZE]; // for directory name
 	char *fname = r.fname;
 	int fd;
 	int buffile;
 	char line[256];
 	char *ptr, lsbuf[BUF_LEN];
 	int status;
-	struct stat st_buf;
+	struct stat st_buf,dir_buf;
 	time_t curt = time(NULL);
-	char SERVER[50];
-	gethostname(SERVER, client_s);
+	char *SERVER = "Apache";
+	//scheduling time
 	strcpy(log_data[(int) r.clientfd].sched_time, asctime(gmtime(&curt)));
 	status = stat(r.fname, &st_buf);
 	char timeStr[100];
 	time_t ltime;
 	char datebuf[9];
 	char timebuf[9];
+	//modified time of file
 	strftime(timeStr, 100, "%d-%m-%Y %H:%M:%S", localtime(&st_buf.st_mtime));
-	if (status != 0) {
+	if (status != 0) { //not a file or directory
 		if (debug == 0)
-			syslog(LOG_ERR, "Error in binding");
+			syslog(LOG_ERR, "Error, not an existing file or directory");
 		else
 			printf("Error, not an existing file or directory!");
-	} else if (r.rtype == 0) {
+		log_data[r.clientfd].status = 404; //save status
+		sprintf(
+				obuf,
+				"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",
+				HTTP_NOTOK, asctime(gmtime(&curt)), SERVER, timeStr, HTML,
+				r.size);//header creation
+		send(client_s, obuf, strlen(obuf), 0);//send header
+		strcpy(obuf, DFNF_404);
+		send(client_s, obuf, strlen(obuf), 0);//send webpage
+	} else if (r.rtype == 0) {//wrong request type
 		if (debug == 0)
 			syslog(LOG_ERR, "Error in Request type or Protocol not supported");
 		else
 			printf("Error in Request type or Protocol not supported!");
-	} else if (r.rtype == 1) {
+	} else if (r.rtype == 1) {//HEAD request
 		fd = open(&r.fname[0], O_RDONLY, S_IREAD | S_IWRITE);
-		if (fd == -1) {
+		if (fd == -1) {//File not found
 			if ((strstr(r.fname, ".jpg") != NULL)
 					|| (strstr(r.fname, ".gif") != NULL)
 					|| (strstr(r.fname, ".png") != NULL)
@@ -201,7 +204,7 @@ void *protocol(struct request r) {
 				send(client_s, obuf, strlen(obuf), 0);
 				log_data[r.clientfd].status = 404;
 			}
-		} else {
+		} else {// File found, header sent according to image or html
 			log_data[r.clientfd].status = 200;
 			if ((strstr(r.fname, ".jpg") != NULL)
 					|| (strstr(r.fname, ".gif") != NULL)
@@ -220,15 +223,18 @@ void *protocol(struct request r) {
 			send(client_s, obuf, strlen(obuf), 0);
 		}
 		close(fd);
-	} else if (r.rtype == 2) {
+	} else if (r.rtype == 2) {//GET request,Send the requested file to client
 		if (S_ISREG (st_buf.st_mode)) {
 			fd = open(&r.fname[0], O_RDONLY, S_IREAD | S_IWRITE);
-			if (fd == -1) {
+			if (fd == -1) {//File not found
 				if ((strstr(r.fname, ".jpg") != NULL)
 						|| (strstr(r.fname, ".gif") != NULL)
 						|| (strstr(r.fname, ".png") != NULL)
 						|| (strstr(r.fname, ".html") != NULL)) {
-					printf("File %s not found\n", &r.fname[1]);
+					if (debug == 0)
+						syslog(LOG_ERR, "File %s not found", r.fname);
+					else
+						printf("File %s not found\n", r.fname);
 					log_data[r.clientfd].status = 404;
 					sprintf(
 							obuf,
@@ -239,7 +245,7 @@ void *protocol(struct request r) {
 					strcpy(obuf, FNF_404);
 					send(client_s, obuf, strlen(obuf), 0);
 				}
-			} else {
+			} else {// File found, file sent according to image or html
 				log_data[r.clientfd].status = 200;
 				if ((strstr(r.fname, ".jpg") != NULL)
 						|| (strstr(r.fname, ".gif") != NULL)
@@ -264,21 +270,31 @@ void *protocol(struct request r) {
 					}
 				}
 			}
-		}
-		if (S_ISDIR (st_buf.st_mode)) {
+		} else if (S_ISDIR (st_buf.st_mode)) {//Is Directory
 			DIR *dp;
 			int flag = 0;
 			struct dirent *dirp;
-			if ((dp = opendir(r.fname)) == NULL) {
+			strcat(r.fname,"/");
+			if ((dp = opendir(r.fname)) == NULL) {//directory doesn't exist
 				if (debug == 0)
 					syslog(LOG_ERR, "Error in opening %s", r.fname);
 				else
 					printf("Error in opening %s\n", r.fname);
+				log_data[r.clientfd].status = 404;
+				sprintf(
+						obuf,
+						"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",
+						HTTP_NOTOK, asctime(gmtime(&curt)), SERVER, timeStr,
+						HTML, r.size);
+				send(client_s, obuf, strlen(obuf), 0);
+				strcpy(obuf, DNF_404);
+				send(client_s, obuf, strlen(obuf), 0);
 			}
-			while ((dirp = readdir(dp)) != NULL) {
-				if (strcmp(dirp->d_name, "index.html") == 0) {
+			while ((dirp = readdir(dp)) != NULL) {//check for index.html
+				if (strcasecmp(dirp->d_name, "index.html") == 0||strcasecmp(dirp->d_name, "index.htm") == 0) {//chec
 					flag = 1;
 					sprintf(obuf, "%s%s", fname, dirp->d_name);
+					log_data[r.clientfd].status = 200;
 					fd = open(&obuf[0], O_RDONLY, S_IREAD | S_IWRITE);
 					sprintf(
 							obuf,
@@ -296,13 +312,21 @@ void *protocol(struct request r) {
 					break;
 				}
 			}
-			if (flag != 1) {
+			if (flag != 1) {//display directory contents
 				if ((dp = opendir(r.fname)) == NULL) {
 					if (debug == 0)
 						syslog(LOG_ERR, "Error in opening %s", r.fname);
 					else
 						printf("Error in opening %s", r.fname);
-
+					log_data[r.clientfd].status = 404;
+					sprintf(
+							obuf,
+							"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",
+							HTTP_NOTOK, asctime(gmtime(&curt)), SERVER, timeStr,
+							HTML, r.size);
+					send(client_s, obuf, strlen(obuf), 0);
+					strcpy(obuf, DNF_404);
+					send(client_s, obuf, strlen(obuf), 0);
 				}
 				sprintf(
 						obuf,
@@ -310,13 +334,33 @@ void *protocol(struct request r) {
 						HTTP_OK, asctime(gmtime(&curt)), SERVER, timeStr, HTML,
 						r.size);
 				send(client_s, obuf, strlen(obuf), 0);
-				strcpy(obuf, "<html><body> <h1>Directory Contents</h1>");
+				strcpy(obuf, "<html><body> <h1>Directory Contents</h1><br><h2>Name&emsp;Last Modified Time</h2><br>");
 				send(client_s, obuf, strlen(obuf), 0);
 				obuf[0] = '\0';
+				char temp[BUFSIZE],*found2,uptemp[BUFSIZE];
+				int tpos,i;
+				temp[0]='\0';
+				//get parent directory
+				strncpy(temp,r.fname,strlen(fname)-3);
+				found2 = strrchr(temp, '/');
+				if (found2!=NULL) {
+					tpos = found2 - temp;
+					for (i = 0; i<tpos; i++)
+						uptemp[i] = temp[i];
+					uptemp[i]='\0';
+					sprintf(updir,"%s",uptemp);
+				}
+				sprintf(obuf, "<a href=%s><b><i>Parent Directory</b></i></a><br>", updir);
+				send(client_s, obuf, strlen(obuf), 0);
+				obuf[0] = '\0';
+				//display all the contents
 				while ((dirp = readdir(dp)) != NULL) {
 					if (dirp->d_name[0] != '.') {
-						sprintf(obuf, "<a href=%s%s>%s</a><br>", r.fname,
-								dirp->d_name, dirp->d_name);
+						sprintf(dirname,"%s%s",r.fname,dirp->d_name);
+						stat(dirname, &dir_buf);
+						strftime(timeStr, 100, "%d-%m-%Y %H:%M:%S", localtime(&dir_buf.st_atime));
+						sprintf(obuf, "<a href=%s%s>%s</a>&emsp;&emsp;&emsp;%s&emsp;<br>",r.fname,
+								dirp->d_name, dirp->d_name,timeStr);
 						send(client_s, obuf, strlen(obuf), 0);
 						obuf[0] = '\0';
 					}
@@ -325,13 +369,27 @@ void *protocol(struct request r) {
 				send(client_s, obuf, strlen(obuf), 0);
 				closedir(dp);
 			}
+		} else {
+			if (debug == 0)
+				syslog(LOG_ERR, "Error in opening %s", r.fname);
+			else
+				printf("Error in opening %s\n", r.fname);
+			log_data[r.clientfd].status = 404;
+			sprintf(
+					obuf,
+					"%s Date:%s SERVER:%s\n Last Modified:%s\n %s Content-Length:%d\n\n",
+					HTTP_NOTOK, asctime(gmtime(&curt)), SERVER, timeStr, HTML,
+					r.size);
+			send(client_s, obuf, strlen(obuf), 0);
+			strcpy(obuf, DNF_404);
+			send(client_s, obuf, strlen(obuf), 0);
 		}
 		close(fd);
 	}
 	log_status(r.clientfd);
 	close(client_s);
 }
-
+//Thread pool creation
 struct tpool *poolinit() {
 	struct tpool *t;
 	t = (struct tpool*) malloc(sizeof(struct tpool));
@@ -346,7 +404,7 @@ struct tpool *poolinit() {
 	t->nthreads = nthreads;
 
 	// Initialise the request queue
-	t->reqqueue.njob = 0;
+	t->reqqueue.nreq = 0;
 	t->reqqueue.queueSem = (sem_t*) malloc(sizeof(sem_t));
 	sem_init(t->reqqueue.queueSem, 0, 0);
 	// Create threads in pool
@@ -360,16 +418,16 @@ struct tpool *poolinit() {
 	}
 	return t;
 }
-
+//assign requests to queue
 void* handlereq(void *th) {
 	struct tpool*t = (struct tpool *) th;
-	while (execution || newsock == 2) {
+	while (execution) {
 		if (quetime) {
 			sleep(quetime);
 			quetime = 0;
 		}
 		if (sem_wait(t->reqqueue.queueSem)) //waiting for a request
-				{
+		{
 			if (debug == 0)
 				syslog(LOG_ERR, "Error in semaphore wait");
 			else
@@ -386,37 +444,38 @@ void* handlereq(void *th) {
 			protocol(r); //execute function
 			if (debug == 1)
 				pthread_mutex_unlock(&debug_mutex);
-		} else {
+		}
+		else {
 			break;
 		}
 	}
 
 	pthread_exit(NULL);
 }
-
+//add requests to queue
 int quereq(struct tpool* t, struct request r, int size) {
 	pthread_mutex_lock(&get_mutex);
+	//sch:1->FCFS,2->SJF
 	if (sch == 1) {
 		t->reqqueue.fcfs.push_back(r);
 	} else {
 		t->reqqueue.sjf[size] = r;
 	}
-	t->reqqueue.njob++;
-	sem_post(t->reqqueue.queueSem);
+	t->reqqueue.nreq++;
+	sem_post(t->reqqueue.queueSem);//keeps track of no requests in queue
 	int sval;
 	sem_getvalue(t->reqqueue.queueSem, &sval);
 	pthread_mutex_unlock(&get_mutex);
 
 	return 0;
 }
-
+//destroy the pool
 void delpool(struct tpool* t) {
 	int i;
 	execution = 0; //end thread's infinite loop
 	for (i = 0; i < (t->nthreads); i++) //idle threads waiting at semaphore
-	{
-		if (sem_post(t->reqqueue.queueSem))
-		{
+			{
+		if (sem_post(t->reqqueue.queueSem)) {
 			if (debug == 0)
 				syslog(LOG_ERR, "Error in sem_post");
 			else
@@ -450,6 +509,7 @@ int main(int argc, char *argv[]) {
 	struct tpool *threadpool;
 
 	log_file[0] = '\0';
+	//syslog
 	openlog("myhttpd", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL0);
 	union {
 		uint32_t addr;
@@ -461,37 +521,35 @@ int main(int argc, char *argv[]) {
 	else
 		progname++;
 	server = 1;
-	while ((ch = getopt(argc, argv, "adhr:s:n:p:l:t:")) != -1)
+	//check various options
+	while ((ch = getopt(argc, argv, "dhr:s:n:p:l:t:")) != -1)
 		switch (ch) {
-		case 'a':
-			aflg++; /* print address in output */
-			break;
-		case 'd':
+		case 'd': //debug mode
 			debug = 1;
 			dflag = 1;
 			break;
-		case 'r':
+		case 'r': //set root directory
 			strcpy(rootdir, optarg);
 			break;
-		case 's':
+		case 's': //set scheduling policy
 			if (strcmp(optarg, "FCFS"))
 				sch = 1;
 			else if (strcmp(optarg, "SJF"))
 				sch = 2;
 			break;
-		case 'n':
+		case 'n': //no of threads
 			nthreads = atoi(optarg);
 			break;
-		case 'p':
+		case 'p': //set port no
 			port = optarg;
 			break;
-		case 'l':
+		case 'l': //address of log file
 			strncpy(log_file, optarg, sizeof(log_file));
 			break;
-		case 't':
+		case 't': //queuing time
 			quetime = atoi(optarg);
 			break;
-		case 'h':
+		case 'h': //help
 		default:
 			usage();
 			break;
@@ -502,15 +560,19 @@ int main(int argc, char *argv[]) {
 		usage();
 	if (!server && port == NULL)
 		usage();
+	//creation of daemon process
 	if (debug == 0) {
-		derr = daemon_init();
-		if (derr != 0)
-			printf("Error in daemon process creation!");
+		if(fork() > 0 ){
+			//Parent killed
+			exit(1);
+		}
+		//Child Running
+		setsid();
+		chdir(rootdir);
+		umask(0);
 	}
 
-	/*
-	 * Create socket on local host.
-	 */
+	// Create socket on local host
 	if ((s = socket(AF_INET, soctype, 0)) < 0) {
 		if (debug == 0)
 			syslog(LOG_ERR, "Error in socket creation!");
@@ -527,14 +589,14 @@ int main(int argc, char *argv[]) {
 		pthread_attr_setstacksize(&attr, stacksize);
 		pthread_attr_getstacksize(&attr, &stacksize);
 		int f = 1;
-		pthread_create(&listhread, &attr, setup_server, (void*) f);
+		pthread_create(&listhread, &attr, setup_server, (void*) f); //Listening thread
 		threadpool = poolinit();
-		pthread_create(&schque, &attr, queue, (void *) threadpool);
+		pthread_create(&schque, &attr, queue, (void *) threadpool); //Queuing thread
 		pthread_attr_destroy(&attr);
 		pthread_join(listhread, NULL);
 		pthread_join(schque, NULL);
 	}
-	closelog();
+	//closelog();
 	fclose(log_file_fd);
 	return (0);
 }
@@ -557,31 +619,43 @@ void *queue(void *tp) {
 	FILE *fd;
 	int status;
 	struct stat st_buf;
+	char *tilda,username[50];
+	int tpos, i = 0;
 	while (1) {
 		if (newsock == 1) {
 			newsock = 0;
 			retcode = recv((int) clsock, ibuf, BUFSIZE, 0); //HTTP request
 			sscanf(ibuf, "%s %s %s", action, fname, host);
 			int i = 0;
-			/*for(;ibuf[i]!='\r';i++)
-			 log_data[(int)clsock].method[i]=ibuf[i];
-			 log_data[(int)clsock].method[i]='\0';*/
-			sprintf(log_data[(int) clsock].method, "%s %s %s", action, fname,host);
+			sprintf(log_data[(int) clsock].method, "%s %s %s", action, fname,
+					host);
 			if (retcode < 0) {
 				if (debug == 0)
 					syslog(LOG_ERR, "Error in receive!");
 				else
 					printf("Error in receive!\n");
-			} else {
-				//get the file name
-				found = strstr(fname, home);
-				if (!found) {
-					strcpy(temp, fname);
+			} else {//get the file name
+				//handle tilda
+				tilda = strchr(fname, '~');
+				if (tilda != NULL) {
+					tpos = tilda - fname + 1;
+					for (i = 0; fname[tpos] != '/'; i++, tpos++)
+						username[i] = fname[tpos];
+					username[i] = '\0';
 					fname[0] = '\0';
-					if (*rootdir == '\0')
-						sprintf(rootdir, "%s", (char*) dir.c_str());
-					sprintf(fname, "%s%s", rootdir, temp);
+					sprintf(updir,"/home/%s/",username);
+					sprintf(fname, "/home/%s/myhttpd/", username);
+				} else { //get file or directory to open
+					found = strstr(fname, home);
+					if (!found) {
+						strcpy(temp, fname);
+						fname[0] = '\0';
+						if (*rootdir == '\0')
+							sprintf(rootdir, "%s", (char*) dir.c_str());
+						sprintf(fname, "%s%s", rootdir, temp);
+					}
 				}
+				//get file size
 				status = stat(fname, &st_buf);
 				if (status != 0) {
 					if (debug == 0)
@@ -589,45 +663,43 @@ void *queue(void *tp) {
 								"Error, not an existing file or directory");
 					else
 						printf("Error, not an existing file or directory");
-					continue;
+					size = 0;
 				} else {
 					if (S_ISREG (st_buf.st_mode)) {
 						fd = fopen(fname, "rb");
 						fseek(fd, 0, SEEK_END);
 						size = ftell(fd);
 						fclose(fd);
-					}
-					if (S_ISDIR (st_buf.st_mode)) {
+					} else if (S_ISDIR (st_buf.st_mode))
 						size = 0;
-					}
+					else
+						size = 0;
 				}
 				log_data[(int) clsock].size = size;
 			}
 			r.clientfd = (int) clsock;
 			strcpy(r.fname, fname);
 			r.size = size;
-			if (strcmp(host, "HTTP/1.0") == 0
-					|| strcmp(host, "HTTP/1.1") == 0) {
-				if (strcmp(action, "HEAD") == 0)
+			if (strcasecmp(host, "HTTP/1.0") == 0
+					|| strcasecmp(host, "HTTP/1.1") == 0) {
+				if (strcasecmp(action, "HEAD") == 0)
 					r.rtype = 1;
-				else if (strcmp(action, "GET") == 0)
+				else if (strcasecmp(action, "GET") == 0)
 					r.rtype = 2;
 				else
 					r.rtype = 0;
 			} else
 				r.rtype = 0;
+			//queue the request
 			quereq(thread_pool, r, size);
-		} else if (newsock == 2)
-			break;
+		}
 	}
 	execution = 0;
 	delpool(thread_pool);
 	pthread_exit(NULL);
 }
 
-/*
- * setup_server() - set up socket for mode of soc running as a server.
- */
+// setup_server() - set up socket for mode of soc running as a server
 
 void *setup_server(void *f) {
 	struct sockaddr_in serv, remote, addr;
@@ -679,8 +751,7 @@ void *setup_server(void *f) {
 		if (newsock == 0) {
 			if (soctype == SOCK_STREAM) {
 				if (debug == 0)
-					syslog(LOG_NOTICE,
-							"Entering accept() waiting for connection.");
+					syslog(LOG_NOTICE,"Entering accept() waiting for connection.");
 				else
 					printf("Entering accept() waiting for connection.\n");
 				clsock = accept(s, (struct sockaddr *) &remote, &len);
@@ -696,16 +767,13 @@ void *setup_server(void *f) {
 				strcpy(log_data[(int) clsock].receipt_time,
 						asctime(gmtime(&curt)));
 			}
-		} else if (newsock == 2)
-			break;
+		}
 	}
 	close(s);
 	pthread_exit(NULL);
 }
 
-/*
- * usage - print usage string and exit
- */
+//print usage string and exit
 
 void usage() {
 	fprintf(
